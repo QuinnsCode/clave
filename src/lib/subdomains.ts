@@ -68,6 +68,7 @@ export const SANDBOX_SUBDOMAINS = [
     
     // Product/brand
     'qntbr',
+    'qlave',
     'quantbar',
     'quantum',
     'official',

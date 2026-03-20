@@ -426,7 +426,7 @@ export function CaveEntrance({ className = '', showFlag = true }: CaveEntrancePr
                 textShadow: '1px 1px 3px rgba(0,0,0,0.9)'
               }}
             >
-              QNTBR
+              QLAVE
             </div>
           </div>
         </>

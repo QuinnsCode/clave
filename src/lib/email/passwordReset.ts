@@ -198,8 +198,8 @@ export function getPasswordResetEmailHTML(resetUrl: string): string {
             <table class="email-content" width="100%" cellpadding="0" cellspacing="0" role="presentation">
               <tr>
                 <td class="email-masthead">
-                  <a href="https://qntbr.com" class="email-masthead_name">
-                    Q N T B R
+                  <a href="https://qlave.dev" class="email-masthead_name">
+                    Q L A V E
                   </a>
                 </td>
               </tr>
@@ -210,7 +210,7 @@ export function getPasswordResetEmailHTML(resetUrl: string): string {
                       <td class="content-cell">
                         <div>
                           <h1>Hello adventurer,</h1>
-                          <p>You recently requested to reset your password for your QNTBR account. Use the button below to reset it. <strong>This password reset is only valid for the next 1 hour.</strong></p>
+                          <p>You recently requested to reset your password for your QLAVE account. Use the button below to reset it. <strong>This password reset is only valid for the next 1 hour.</strong></p>
                           
                           <table class="body-action" align="center" width="100%" cellpadding="0" cellspacing="0" role="presentation">
                             <tr>
@@ -227,7 +227,7 @@ export function getPasswordResetEmailHTML(resetUrl: string): string {
                           </table>
   
                           <p>If you did not request a password reset, please ignore this email or contact us if you have questions.</p>
-                          <p>May your draws be legendary,<br>The QNTBR team</p>
+                          <p>May your draws be legendary,<br>The QLAVE team</p>
                           
                           <table class="body-sub" role="presentation">
                             <tr>
@@ -249,7 +249,7 @@ export function getPasswordResetEmailHTML(resetUrl: string): string {
                     <tr>
                       <td class="content-cell" align="center">
                         <p class="sub align-center">
-                          QNTBR - Virtual Tabletop for Trading Card Games
+                          QLAVE - Virtual Tabletop for Trading Card Games
                         </p>
                       </td>
                     </tr>

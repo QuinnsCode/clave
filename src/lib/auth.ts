@@ -10,7 +10,7 @@ import { db } from "@/db";
 import { Resend } from "resend";
 import { getPasswordResetEmailHTML } from "./email/passwordReset";
 
-const resend = env.RESEND_API_KEY ? new Resend(env.RESEND_API_KEY) : null;
+const resend = (env as any).RESEND_API_KEY ? new Resend((env as any).RESEND_API_KEY) : null;
 
 export const createAuth = () => {
   return betterAuth({
@@ -52,9 +52,9 @@ export const createAuth = () => {
   
         // Use void to prevent timing attacks (don't await)
         void resend!.emails.send({
-          from: "QNTBR <no-reply@doubledragonsupply.com>",
+          from: "QLAVE <no-reply@doubledragonsupply.com>",
           to: [user.email],
-          subject: "Reset Your Password - QNTBR",
+          subject: "Reset Your Password - QLAVE",
           html: getPasswordResetEmailHTML(url),
         }).then(() => {
           console.log('✅ Password reset email sent to:', user.email);
@@ -69,31 +69,50 @@ export const createAuth = () => {
         
         // Optional: Send confirmation email
         void resend!.emails.send({
-          from: "QNTBR <no-reply@doubledragonsupply.com>",
+          from: "QLAVE <no-reply@doubledragonsupply.com>",
           to: [user.email],
-          subject: "Password Changed - QNTBR",
+          subject: "Password Changed - QLAVE",
           html: `
             <h2>Password Changed</h2>
             <p>Your password has been successfully changed.</p>
             <p>If you did not make this change, please contact us immediately.</p>
-            <p>May your draws be legendary,<br>The QNTBR team</p>
+            <p>May your draws be legendary,<br>The QLAVE team</p>
           `,
         }).catch((error) => {
           console.error('❌ Failed to send password changed confirmation:', error);
         });
       }
     },
-    // ADD THIS:
+    databaseHooks: {
+      user: {
+        create: {
+          after: async (user) => {
+            try {
+              await db.site.create({
+                data: {
+                  userId: user.id,
+                  siteKey: crypto.randomUUID(),
+                  name: "My Site",
+                },
+              });
+            } catch (e) {
+              // Don't block signup if site creation fails — log and move on
+              console.error("[Qlave] Failed to create default Site for user:", user.id, e);
+            }
+          },
+        },
+      },
+    },
     socialProviders: {
       discord: {
-        clientId: env.DISCORD_CLIENT_ID,
-        clientSecret: env.DISCORD_CLIENT_SECRET,
+        clientId: (env as any).DISCORD_CLIENT_ID,
+        clientSecret: (env as any).DISCORD_CLIENT_SECRET,
         // Optional: add scopes if you want guild/server access
         // scopes: ["identify", "email", "guilds", "guilds.join"],
       },
       google: {
-        clientId: env.GOOGLE_CLIENT_ID,
-        clientSecret: env.GOOGLE_CLIENT_SECRET,
+        clientId: (env as any).GOOGLE_CLIENT_ID,
+        clientSecret: (env as any).GOOGLE_CLIENT_SECRET,
         prompt: "select_account", // Forces Google account picker every time
       }
     },
@@ -118,11 +137,11 @@ export const createAuth = () => {
     advanced: {
       crossSubDomainCookies: env.BETTER_AUTH_URL.includes('localhost')
       ? { enabled: false }
-      : { enabled: true, domain: ".qntbr.com" }
+      : { enabled: true, domain: ".qlave.dev" }
     },
     trustedOrigins: [
-      "https://qntbr.com",
-      "https://*.qntbr.com",
+      "https://qlave.com",
+      "https://*.qlave.com",
       "http://localhost:5173",
       "http://*.localhost:5173",
       "http://localhost:8787",

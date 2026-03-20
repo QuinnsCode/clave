@@ -10,7 +10,7 @@ test.describe('Subdomain Tests', () => {
   });
 
   test('org subdomain redirects to login', async ({ page }) => {
-    await page.goto('http://testorg.127.0.0.1.nip.io:5173/sanctum');
+    await page.goto('http://testorg.127.0.0.1.nip.io:5173/dashboard');
     await expect(page).toHaveURL(/\/user\/login/);
   });
 });

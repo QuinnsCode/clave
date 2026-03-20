@@ -16,17 +16,17 @@ function getRedirectUrl(slug: string, request: Request): string {
   // Local development (localhost)
   if (hostname.includes('localhost')) {
     const port = url.port || '5173';
-    return `${protocol}//${slug}.localhost:${port}/sanctum`;
+    return `${protocol}//${slug}.localhost:${port}/dashboard`;
   }
   
   // Wrangler dev (workers.dev)
   if (hostname.includes('workers.dev')) {
     const workerDomain = hostname.split('.').slice(-3).join('.');
-    return `${protocol}//${slug}.${workerDomain}/sanctum`;
+    return `${protocol}//${slug}.${workerDomain}/dashboard`;
   }
   
-  // Production (qntbr.com)
-  return `${protocol}//${slug}.qntbr.com/sanctum`;
+  // Production (qlave.com)
+  return `${protocol}//${slug}.qlave.com/dashboard`;
 }
 
 export async function createOrganization(formData: FormData) {

@@ -18,7 +18,7 @@ test.describe('Authentication Flow', () => {
       orgSlug
     );
     
-    // After signup, should be on the org subdomain at /sanctum
+    // After signup, should be on the org subdomain at /dashboard
     await page.waitForTimeout(1000); // Small wait for navigation
     
     const finalUrl = page.url();
@@ -26,7 +26,7 @@ test.describe('Authentication Flow', () => {
     
     // Should be on org subdomain
     expect(finalUrl).toContain(`${orgSlug}.localhost`);
-    expect(finalUrl).toContain('/sanctum');
+    expect(finalUrl).toContain('/dashboard');
   });
 
   test('user can login after signup', async ({ page }) => {
@@ -55,11 +55,11 @@ test.describe('Authentication Flow', () => {
     await loginUser(page, email, password);
     
     // Navigate to the org
-    await page.goto(`http://${orgSlug}.localhost:5173/sanctum`);
+    await page.goto(`http://${orgSlug}.localhost:5173/dashboard`);
     
     // Should be able to access it
     await expect(page).not.toHaveURL(/\/user\/login/);
-    expect(page.url()).toContain('sanctum');
+    expect(page.url()).toContain('dashboard');
   });
 
   test('non-member cannot access org', async ({ page, browser }) => {
@@ -97,7 +97,7 @@ test.describe('Authentication Flow', () => {
     );
     
     // User 2 tries to access User 1's org
-    await page2.goto(`http://${orgSlug}.localhost:5173/sanctum`);
+    await page2.goto(`http://${orgSlug}.localhost:5173/dashboard`);
     await page2.waitForLoadState('networkidle');
     
     const finalUrl = page2.url();
@@ -105,7 +105,7 @@ test.describe('Authentication Flow', () => {
     
     // Check if they were blocked (should redirect to login or no-access)
     // OR if they can access it (which would be a security bug)
-    if (finalUrl.includes('/sanctum') && finalUrl.includes(`${orgSlug}.localhost`)) {
+    if (finalUrl.includes('/dashboard') && finalUrl.includes(`${orgSlug}.localhost`)) {
       console.warn('⚠️  SECURITY ISSUE: User 2 can access User 1 org!');
       throw new Error('Authorization bug: Non-member can access private org');
     }

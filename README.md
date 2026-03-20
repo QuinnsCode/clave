@@ -2,7 +2,7 @@
 
 A production-ready starter for [RedwoodSDK](https://docs.rwsdk.com/) on Cloudflare Workers.
 
-Built by [qntbr](https://qntbr.com) after shipping a real app with this stack. The goal is to skip the painful setup and get straight to building.
+Built by [qntbr](https://qntbr.com) after shipping a real app with this stack. The goal is to skip the painful setup and get straight to building — and to understand *why* the architecture works, not just copy it.
 
 ---
 
@@ -10,15 +10,15 @@ Built by [qntbr](https://qntbr.com) after shipping a real app with this stack. T
 
 - **RedwoodSDK** — full-stack React framework on Cloudflare Workers
 - **Tailwind CSS** — utility-first styling, configured and ready
-- **BetterAuth** — email/password auth with org support, session management, password reset
+- **BetterAuth** — email/password + Google OAuth, org support, session management, password reset
 - **Prisma + D1** — type-safe SQLite on Cloudflare D1
 - **Organization scoping** — subdomain-based multi-tenancy (`org.yourdomain.com`)
 - **Durable Objects** — `UserSessionDO` as a working hibernation example with WebSocket
 - **Stripe** — real checkout session + webhook handler, wired end to end
 - **Rate limiting** — KV-backed rate limiter on sensitive routes
 - **Turnstile** — Cloudflare bot protection on signup
-- **Middleware chain** — session → org → autoCreateOrg, documented and battle-tested
-- **Server actions** — thin wrappers over services, usable from both RSC and API routes
+- **Middleware system** — split session/org context with centralized route policy config
+- **Server actions** — thin wrappers over services, callable from both RSC and client components
 
 ---
 
@@ -26,100 +26,244 @@ Built by [qntbr](https://qntbr.com) after shipping a real app with this stack. T
 
 I wanted React Server Components without paying Next.js/Vercel prices, and without the GraphQL layer that always felt like overhead for solo and small-team projects.
 
-RedwoodSDK gives you RSC and SSR on Cloudflare Workers. That means your server components render at the edge, close to your users, and the cacheable parts stay cached. You get to decide what's server-rendered and what's client — no framework forcing your hand. And because it's just Cloudflare Workers, you can reuse the same service functions in server actions, API routes, and webhooks. No duplication, no special cases.
+RedwoodSDK gives you RSC and SSR on Cloudflare Workers. Your server components render at the edge, close to your users, and the cacheable parts stay cached. You decide what's server-rendered and what's client — no framework forcing your hand. And because it's just a Cloudflare Worker, the same service functions work in server actions, API routes, and webhooks. No duplication, no special cases.
 
-The Cloudflare infra piece is genuinely great:
-- **Workers** compute is cheap and distributed globally by default
-- **D1** is SQLite at the edge — easy to reason about, Prisma makes it portable to other DBs if needed
-- **Durable Objects** are the killer feature — persistent stateful compute with WebSocket hibernation. You pay for active processing time only (~10-50ms per message), not connection time. A WebSocket DO hibernates between messages and costs essentially nothing at rest
-- **KV** for fast reads on things like auth cache and rate limits
-- **R2** has no egress fees — store assets without the AWS S3 egress tax
+The Cloudflare infra is genuinely great:
+- **Workers** — cheap, globally distributed compute. You pay per invocation, not per server
+- **D1** — SQLite at the edge. Easy to reason about, Prisma makes it portable if you ever need to move
+- **Durable Objects** — the killer feature. Persistent stateful compute with WebSocket hibernation. You pay for active processing time only (~10-50ms per message), not connection time. A DO hibernates between messages and costs essentially nothing at rest
+- **KV** — fast global reads for things like auth cache and rate limits
+- **R2** — object storage with no egress fees. No AWS S3 egress tax
 
-Prisma on top of all this means if you ever need to move off D1, it's a config change, not a rewrite.
+Prisma on top means if you ever need to move off D1, it's a config change, not a rewrite.
 
 ---
 
 ## Architecture
 
-### Request flow
+This is the part most starters skip. Understanding the layers makes everything else obvious.
+
+### The layers
 
 ```
-Browser → Cloudflare Worker (src/worker.tsx)
-            │
-            ├── Middleware chain
-            │     1. URL normalization (www strip, HTTPS enforce)
-            │     2. initializeServices()       — DB singleton
-            │     3. setupSessionContext()      — BetterAuth cookie → ctx.user
-            │     4. setupOrganizationContext() — subdomain → ctx.organization
-            │     5. autoCreateOrgMiddleware()  — create org for new users
-            │
-            ├── Route matching
-            │     /__user-session   → UserSessionDO (WebSocket)
-            │     /api/auth/*       → BetterAuth handler
-            │     /api/stripe/*     → Stripe checkout
-            │     /api/webhooks/*   → Stripe / LemonSqueezy webhooks
-            │     /api/*            → catch-all dynamic loader
-            │     /*                → RSC render
+┌─────────────────────────────────────────────────────────┐
+│  CLIENT                                                  │
+│  React components, hooks, WebSocket clients              │
+│  Runs in the browser — no DB, no secrets, no DO access   │
+└──────────────────────┬──────────────────────────────────┘
+                       │  RSC / "use server" / fetch / WebSocket
+┌──────────────────────▼──────────────────────────────────┐
+│  WORKER  (src/worker.tsx)                                │
+│  Middleware chain, route matching, DO stub routes        │
+│  Every request passes through here first                 │
+└──────────┬─────────────────────────┬────────────────────┘
+           │                         │
+    ┌──────▼──────┐         ┌────────▼────────────────────┐
+    │  SERVICES   │         │  DURABLE OBJECTS             │
+    │             │         │                              │
+    │  Pure fns   │         │  UserSessionDO               │
+    │  DB / KV    │         │  SessionDurableObject        │
+    │  No routing │         │                              │
+    │  No DO deps │         │  Stateful, WebSocket,        │
+    │             │         │  hibernation, storage        │
+    │  Reusable   │         │  Use Manager classes         │
+    │  everywhere │         │  to keep DO logic clean      │
+    └──────┬──────┘         └─────────────────────────────┘
+           │  called from any of:
+           ├── Server components (RSC render)
+           ├── Server actions ("use server" from client)
+           ├── API route handlers (/api/*)
+           └── Webhook handlers (/api/webhooks/*)
 ```
 
-### Server actions
+### Services — the reusable core
 
-Server actions live in `src/app/serverActions/` and are the standard way to run server-side logic from React components. They can also be called from API routes — same function, no duplication.
+Services are plain functions that talk to the DB, KV, or external APIs. They have no concept of HTTP, routing, or Durable Objects. This is what makes them reusable everywhere.
 
-```
-src/app/serverActions/
-├── admin/
-│   ├── signup.ts                  # Create user + org in one transaction
-│   ├── createOrgForExistingUser.ts
-│   └── getFirstOrgSlugOfUser.ts
-├── orgs/
-│   └── createOrg.ts               # Create organization, set membership
-├── stripe/
-│   ├── createCheckoutSession.ts   # Stripe checkout session
-│   └── createPortalSession.ts     # Stripe billing portal
-└── user/
-    └── setPassword.ts             # Password update
+```ts
+// src/lib/services/orgs.ts
+export async function getOrgBySlug(slug: string) {
+  return db.organization.findUnique({ where: { slug } });
+}
 ```
 
-Server actions are thin — they validate inputs, call the DB or a service, and return a typed result. They don't own routing or response formatting. The same action works whether called from a server component, a client component via RSC, or directly from an API handler.
+### Server actions — client using server things safely
 
-### Durable Objects
+```ts
+// src/app/serverActions/orgs/createOrg.ts
+"use server";
 
-`UserSessionDO` is the working example in this starter. It demonstrates the **Hibernation API** pattern — the correct and cost-efficient way to run WebSocket DOs on Cloudflare.
-
-Key properties of the hibernation pattern:
-- The DO sleeps between messages — you only pay for active processing (~10-50ms per message)
-- `state.acceptWebSocket(server, [tag])` registers the socket with the CF runtime, not your code
-- `webSocketMessage` and `webSocketClose` are class methods, not event listeners
-- The DO can broadcast to all connected sockets with `state.getWebSockets()`
-- Storage (`state.storage`) persists across hibernations
-
-At 10,000 users each maintaining a persistent WebSocket, this pattern costs roughly $0.75/month.
-
-Connect from the client:
-```
-ws://yourdomain/__user-session?userId=xxx&deviceId=yyy
+export async function createOrg(name: string) {
+  const slug = slugify(name);
+  return db.organization.create({ data: { name, slug } });
+}
 ```
 
-### API routes (catch-all loader)
+```tsx
+// src/app/components/CreateOrgForm.tsx
+"use client";
+import { createOrg } from "@/app/serverActions/orgs/createOrg";
 
-Drop a file in `src/app/api/` and it's live — no route registration needed:
+export function CreateOrgForm() {
+  return <button onClick={() => createOrg("My Team")}>Create org</button>;
+}
+```
+
+### API routes — for external callers
+
+Drop a file in `src/app/api/` and it's live:
 
 ```ts
 // src/app/api/my-endpoint.ts
 export default async function({ request, ctx, params }: any) {
-  return Response.json({ hello: "world" });
+  return Response.json({ ok: true });
 }
-// → available at /api/my-endpoint
+// → /api/my-endpoint, no registration needed
 ```
 
-### Organization scoping
+### Durable Objects — stateful distributed compute
 
-Every org gets a subdomain: `myorg.yourdomain.com`. The middleware reads the subdomain, looks up the org in D1 (with KV cache), and populates `ctx.organization`. Routes branch on `ctx.organization`, `ctx.user`, and `ctx.userRole`. New users are automatically redirected to create an org on first login.
+DOs are the right tool for state that persists across requests, or coordinating multiple clients in real time.
+
+The key pattern is **Hibernation API** — the DO sleeps between messages and only wakes to process. At 10,000 users each holding an open WebSocket, you're paying roughly $0.75/month.
+
+```ts
+export class UserSessionDO extends DurableObject {
+  async fetch(request: Request) {
+    if (request.headers.get("Upgrade") === "websocket") {
+      const [client, server] = Object.values(new WebSocketPair());
+      this.state.acceptWebSocket(server, [tag]);
+      return new Response(null, { status: 101, webSocket: client });
+    }
+  }
+
+  webSocketMessage(ws: WebSocket, message: string) {
+    this.broadcast(message);
+  }
+
+  webSocketClose(ws: WebSocket) {
+    console.log("peer disconnected");
+  }
+}
+```
+
+**Keep DOs clean with Manager classes.** Business logic should not live in the DO directly:
+
+```ts
+export class MySessionDO extends DurableObject {
+  private signaling: SignalingManager;
+  private peers: PeerRegistry;
+
+  constructor(state: DurableObjectState, env: Env) {
+    super(state, env);
+    this.signaling = new SignalingManager(state);
+    this.peers = new PeerRegistry(state);
+  }
+
+  webSocketMessage(ws: WebSocket, message: string) {
+    this.signaling.handle(ws, message, this.peers);
+  }
+}
+```
+
+### The `/__` route convention
+
+DO routes use the `/__` prefix. All `/__*` routes skip the full middleware chain — no session lookup, no org resolution, no auth overhead. They handle their own auth:
+
+```ts
+route("/__user-session", async ({ request }) => {
+  const userId = new URL(request.url).searchParams.get("userId");
+  const id = env.USER_SESSION_DO.idFromName(userId);
+  return env.USER_SESSION_DO.get(id).fetch(request);
+}),
+```
 
 ---
 
-## Getting live fast
+## Middleware system
+
+This is the most evolved part of the starter. Understanding it saves hours of debugging.
+
+### The split: session vs org context
+
+The original starter had a single `shouldSkipMiddleware()` that blocked everything. In production this caused a critical bug: **API routes skipped session context**, so `ctx.user` was always null inside API handlers — meaning auth checks inside API routes were always bypassed.
+
+The fix is to split middleware into two independent concerns:
+
+| Context | What it does | Who needs it |
+|---|---|---|
+| **Session** | Reads BetterAuth cookie → `ctx.user` | API routes, dashboard, all authenticated pages |
+| **Org** | Reads subdomain → `ctx.organization` | Dashboard, org-scoped pages only |
+
+API routes need session (so `ctx.user` is available for auth checks) but do not need org context.
+
+### Centralized route policy — `src/lib/middleware/config.ts`
+
+Instead of scattered skip lists in `middlewareFunctions.ts` and inline CSP headers in `worker.tsx`, all route policies live in one file:
+
+```ts
+// src/lib/middleware/config.ts
+
+export const ROUTE_POLICIES = [
+  // Force overrides — always run full middleware
+  { prefix: "/__draftsync", policy: { level: "full" }, force: true },
+
+  // Public — no auth at all
+  { prefix: "/__",          policy: { level: "public" } },  // all internal DO routes
+  { prefix: "/s",           policy: { level: "public", headers: { "Permissions-Policy": "camera=*, microphone=*" } } },
+  { prefix: "/user/login",  policy: { level: "public" } },
+  { prefix: "/api/auth/",   policy: { level: "public" } },  // BetterAuth handles its own session
+  { prefix: "/api/webhooks/", policy: { level: "public" } }, // verified by webhook secret
+
+  // Session only — ctx.user available, no org lookup
+  { prefix: "/api/",        policy: { level: "session" } },
+
+  // Full — ctx.user + ctx.organization
+  { prefix: "/dashboard",   policy: { level: "full", headers: { "Content-Security-Policy": "..." } } },
+];
+```
+
+**To add a new route, add one entry here. No other files change.**
+
+Three levels:
+- `"public"` — skips both session and org context
+- `"session"` — reads auth cookie → `ctx.user`, skips org lookup
+- `"full"` — reads session + subdomain org, runs autoCreateOrg
+
+### CSP and headers in config
+
+Route-specific headers (CSP, `Permissions-Policy`) also live in config and are applied by a single `applyRouteHeaders` middleware in `worker.tsx`. This means **no inline header-setting functions scattered across route definitions**.
+
+### The middleware chain
+
+Order matters. Do not reorder:
+
+```
+1. URL normalization       — www strip, HTTPS enforce
+2. CDN passthrough         — cdn.yourdomain.com → R2
+3. applyRouteHeaders()     — CSP, Permissions-Policy from config
+4. initializeServices()    — DB singleton, called once per isolate
+5. setupSessionContext()   — reads BetterAuth cookie → ctx.user
+6. setupOrganizationContext() — reads subdomain → ctx.organization
+7. autoCreateOrgMiddleware()  — redirects new users to /orgs/new
+```
+
+Steps 5 and 6 each check `config.ts` internally to decide whether to run. The caller (`worker.tsx`) doesn't need any skip logic.
+
+### Real-world bugs this prevents
+
+**API routes returning 401 even for logged-in users:**
+Caused by `/api/` being in `SKIP_SESSION_PREFIXES`. API routes need session context. Fix: only add `/api/auth/` and `/api/webhooks/` to session skip — not all of `/api/`.
+
+**Subdomain redirects on public routes:**
+If `/s` (public room pages) isn't in the skip list, `setupOrganizationContext` runs, finds no org for the main domain, and either 404s or redirects. Fix: add `/s` to org skip.
+
+**`/__` routes triggering session lookup:**
+WebSocket upgrade requests aren't standard HTTP — running session middleware on them causes unnecessary DB calls and potential failures. Fix: `/__` prefix skips both contexts entirely.
+
+---
+
+## Full setup guide
 
 ### 1. Clone and install
 
@@ -129,67 +273,185 @@ cd my-app
 pnpm install
 ```
 
-### 2. Create Cloudflare resources
+### 2. Get a domain
+
+We recommend buying through [Cloudflare Registrar](https://www.cloudflare.com/products/registrar/) — DNS is automatic and everything stays in one place.
+
+**Cloudflare dashboard → Domain Registration → Register Domains** → search and purchase.
+
+If you bought elsewhere, go to **Websites → Add a site** and update your registrar's nameservers to Cloudflare's.
+
+**Naming convention:** name resources after your app so they're easy to find across projects:
+- `myapp-db-1`
+- `myapp-auth-cache-kv`
+- `myapp-ratelimit-kv`
+
+### 3. Create Cloudflare resources
+
+#### D1 database
 
 ```bash
-# D1 database
-npx wrangler d1 create my-app-db
-
-# KV namespaces
-npx wrangler kv namespace create RATELIMIT_KV
-npx wrangler kv namespace create AUTH_CACHE_KV
+npx wrangler d1 create myapp-db-1
 ```
 
-Paste the IDs into `wrangler.jsonc`.
+Copy the UUID → paste into `wrangler.jsonc`:
+```jsonc
+"d1_databases": [
+  {
+    "binding": "DB",
+    "database_name": "myapp-db-1",
+    "database_id": "your-uuid-here"
+  }
+]
+```
 
-### 3. Update wrangler.jsonc
+#### KV namespaces
+
+```bash
+npx wrangler kv namespace create myapp-auth-cache-kv
+npx wrangler kv namespace create myapp-ratelimit-kv
+```
+
+```jsonc
+"kv_namespaces": [
+  { "binding": "RATELIMIT_KV", "id": "your-id" },
+  { "binding": "AUTH_CACHE_KV", "id": "your-id" }
+]
+```
+
+> Note: the `binding` name is what the code uses — it doesn't need to match the dashboard name. Only the ID matters.
+
+### 4. Update wrangler.jsonc
 
 ```jsonc
 {
   "name": "my-app",
-  "routes": ["yourdomain.com/*", "*.yourdomain.com/*"],
+  "routes": [
+    "yourdomain.com/*",
+    "*.yourdomain.com/*"
+  ],
   "vars": {
-    "BETTER_AUTH_URL": "https://yourdomain.com"
+    "BETTER_AUTH_URL": "https://yourdomain.com",
+    "PRIMARY_DOMAIN": "yourdomain.com",
+    "APP_NAME": "My App"
   }
 }
 ```
 
-### 4. Set secrets
+### 5. Deploy
+
+Don't create the worker manually in the dashboard — wrangler creates it on first deploy:
+
+```bash
+pnpm run release
+```
+
+This runs: env check → clean → prisma generate → build → wrangler deploy.
+
+### 6. Connect your domain
+
+**Wildcard subdomains** (required for org scoping):
+- Cloudflare dashboard → your domain → DNS
+- **Add record** → Type: `CNAME`, Name: `*`, Content: `yourdomain.com`, Proxy: Proxied
+
+This makes `org.yourdomain.com` route to your worker automatically.
+
+> **Real-world gotcha:** After adding the wildcard CNAME, you also need to add a custom domain in the Worker settings (Workers & Pages → your worker → Settings → Domains & Routes). Without this, the Worker won't receive requests on your domain even if DNS is correct.
+
+### 7. Set secrets
 
 ```bash
 npx wrangler secret put BETTER_AUTH_SECRET     # openssl rand -hex 32
 npx wrangler secret put RESEND_API_KEY         # resend.com
-npx wrangler secret put STRIPE_SECRET_KEY      # stripe.com dashboard
+npx wrangler secret put STRIPE_SECRET_KEY      # stripe.com
 npx wrangler secret put STRIPE_WEBHOOK_SECRET  # stripe dashboard → webhooks
-npx wrangler secret put TURNSTILE_SECRET_KEY   # cloudflare dashboard → turnstile
+npx wrangler secret put TURNSTILE_SECRET_KEY   # cloudflare → turnstile
+npx wrangler secret put GOOGLE_CLIENT_ID       # console.cloud.google.com
+npx wrangler secret put GOOGLE_CLIENT_SECRET   # console.cloud.google.com
 ```
 
-For local dev, copy `.dev.vars.example` to `.dev.vars` and fill in the same values.
+For local dev, copy `.env.example` to `.dev.vars`:
+```bash
+cp .env.example .dev.vars
+```
 
-### 5. Run migrations
+Wrangler reads `.dev.vars` automatically in dev mode.
+
+### 8. Google OAuth
+
+1. [console.cloud.google.com](https://console.cloud.google.com) → create new project
+2. **APIs & Services → OAuth consent screen** → External → fill in app name and domain
+3. **Credentials → Create OAuth Client ID** → Web application
+4. Authorized JavaScript origins:
+   ```
+   https://yourdomain.com
+   http://localhost:5173
+   ```
+5. Authorized redirect URIs:
+   ```
+   https://yourdomain.com/api/auth/callback/google
+   http://localhost:5173/api/auth/callback/google
+   ```
+6. Copy Client ID and Secret → `wrangler secret put`
+
+> **Real-world gotcha:** Google OAuth requires the authorized redirect URI to exactly match what BetterAuth sends. If you get `redirect_uri_mismatch`, check that `BETTER_AUTH_URL` in `wrangler.jsonc` matches your production domain exactly (no trailing slash).
+
+### 9. Resend
+
+1. [resend.com](https://resend.com) → create account
+2. **Domains → Add Domain** → enter your domain
+3. Add the DNS records shown into Cloudflare DNS
+4. Create API key → `npx wrangler secret put RESEND_API_KEY`
+5. Update `from` address in `src/lib/auth.ts`:
+   ```ts
+   from: `My App <no-reply@yourdomain.com>`
+   ```
+
+### 10. Stripe
+
+1. [stripe.com](https://stripe.com) → create account
+2. **Developers → API Keys** → copy secret key → `wrangler secret put STRIPE_SECRET_KEY`
+3. **Developers → Webhooks → Add endpoint** → `https://yourdomain.com/api/webhooks/stripe`
+4. Select events: `checkout.session.completed`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.payment_succeeded`, `invoice.payment_failed`
+5. Copy webhook secret → `wrangler secret put STRIPE_WEBHOOK_SECRET`
+
+Local webhook testing:
+```bash
+stripe listen --forward-to localhost:5173/api/webhooks/stripe
+```
+
+### 11. Turnstile
+
+1. Cloudflare dashboard → **Turnstile → Add site** → enter your domain
+2. Copy **Secret Key** → `npx wrangler secret put TURNSTILE_SECRET_KEY`
+3. Copy **Site Key** → add to your signup form (public — not a secret)
+
+Local dev uses Cloudflare's always-pass test key in `.dev.vars`:
+```bash
+TURNSTILE_SECRET_KEY=1x0000000000000000000000000000000AA
+```
+
+### 12. Run migrations
 
 ```bash
-pnpm exec prisma generate
-npx wrangler d1 execute my-app-db --local --file=prisma/migrations/0001_init.sql
+# Local
+pnpm run migrate:dev
+
+# Production
+pnpm run migrate:prd
 ```
 
-### 6. Dev
+### 13. Dev
 
 ```bash
 pnpm dev
-```
-
-### 7. Deploy
-
-```bash
-pnpm deploy
 ```
 
 ---
 
 ## Required env vars
 
-| Variable | Where to get it |
+| Variable | Where |
 |---|---|
 | `BETTER_AUTH_SECRET` | `openssl rand -hex 32` |
 | `BETTER_AUTH_URL` | Your production URL |
@@ -197,13 +459,38 @@ pnpm deploy
 | `STRIPE_SECRET_KEY` | [stripe.com](https://stripe.com) |
 | `STRIPE_WEBHOOK_SECRET` | Stripe dashboard → Webhooks |
 | `TURNSTILE_SECRET_KEY` | Cloudflare dashboard → Turnstile |
+| `GOOGLE_CLIENT_ID` | [console.cloud.google.com](https://console.cloud.google.com) |
+| `GOOGLE_CLIENT_SECRET` | [console.cloud.google.com](https://console.cloud.google.com) |
 
 Optional:
 
 | Variable | Purpose |
 |---|---|
-| `PRIMARY_DOMAIN` | Used for www redirect (defaults to example.com) |
-| `API_ENCRYPTION_KEY` | 32-byte hex key for encrypted fields |
+| `PRIMARY_DOMAIN` | www redirect + cookie domain scoping |
+| `APP_NAME` | Email subjects and from addresses |
+| `API_ENCRYPTION_KEY` | Encrypted DB fields (`openssl rand -hex 32`) |
+
+---
+
+## Real-world gotchas
+
+These burned us in production. Documented so they don't burn you.
+
+**Auth cache TTL:** `AUTH_CACHE_KV` caches org and membership lookups with a 5-10 minute TTL. If an org appears missing right after creation, wait or flush KV manually. Don't add console.log-driven debugging and assume the code is broken — check the cache first.
+
+**`dbInitialized` is per-isolate:** The `let dbInitialized = false` guard in `initializeServices()` works within a single Worker isolate lifetime. Cloudflare can spin up new isolates at any time. This is fine — it just means the DB connection is re-initialized in new isolates. Don't rely on this for request deduplication.
+
+**DO naming matters:** Durable Objects are named with `idFromName(key)`. If you rename the key you use, existing DOs are orphaned (still exist, just unreachable). Be deliberate about DO naming schemes before going to production.
+
+**`window.location.origin` on subdomains:** If you generate URLs client-side using `window.location.origin`, you get the current subdomain (`notryanquinn.yourdomain.com`) not the main domain. For shareable links that should work for anyone, generate the full URL server-side in the API handler using `new URL(request.url)` and stripping the subdomain.
+
+**WebSocket `siteKey` validation:** WebSocket connections don't support custom headers. Pass auth tokens as query params (`?siteKey=xxx`) and validate server-side before upgrading the connection.
+
+**Wildcard subdomain + DO routing:** A request to `org.yourdomain.com/__mydo` hits your Worker via the wildcard CNAME. Make sure your `/__` routes in `worker.tsx` don't depend on `ctx.organization` — by the time they run, org context hasn't been set (and shouldn't be, for `/__` routes).
+
+**Migrations on D1:** D1 migrations are one-way in production. There's no rollback. Always test migrations locally with `migrate:dev` before `migrate:prd`. Keep migration files small and focused.
+
+**`pnpm run release` vs `wrangler deploy`:** Always use `pnpm run release`. It runs prisma generate before building. Skipping this after schema changes will deploy stale types and cause runtime errors that are confusing to debug.
 
 ---
 
@@ -213,73 +500,87 @@ Optional:
 src/
 ├── worker.tsx                         # Entry point — routes, middleware, DO exports
 ├── durableObjects/
-│   └── userSessionDO.ts               # Example DO with hibernation + WebSocket
+│   └── userSessionDO.ts               # Example DO — hibernation + WebSocket pattern
 ├── session/
 │   └── durableObject.ts               # BetterAuth session DO (don't modify)
 ├── lib/
 │   ├── auth.ts                        # BetterAuth server config
 │   ├── auth-client.ts                 # BetterAuth client config
-│   ├── middlewareFunctions.ts         # Session + org context middleware
+│   ├── middlewareFunctions.ts         # Session + org context setup
 │   ├── rateLimit.ts                   # KV-backed rate limiter
-│   ├── turnstile.ts                   # Cloudflare Turnstile verification
+│   ├── turnstile.ts                   # Turnstile verification
 │   ├── encrypt.ts                     # Field encryption utility
 │   └── middleware/
+│       ├── config.ts                  # ← Route policies, CSP headers, skip rules
 │       └── autoCreateOrgMiddleware.ts
 ├── app/
 │   ├── pages/
 │   │   ├── user/                      # Login, signup, password reset
 │   │   ├── landing/                   # Public landing page
-│   │   ├── sanctum/                   # Authenticated home (rename to /dashboard)
-│   │   ├── settings/                  # User settings
+│   │   ├── dashboard/                 # Authenticated home
+│   │   ├── legal/                     # Terms, Privacy
 │   │   └── errors/                    # OrgNotFound, NoAccess
 │   ├── api/
 │   │   ├── stripe/                    # create-checkout.ts
 │   │   └── webhooks/                  # stripe-wh.ts, lemonsqueezy-wh.ts
 │   ├── serverActions/
-│   │   ├── admin/                     # signup, createOrg, getOrgSlug
-│   │   ├── orgs/                      # createOrg
-│   │   ├── stripe/                    # checkout, portal
-│   │   └── user/                      # setPassword
+│   │   ├── admin/
+│   │   ├── orgs/
+│   │   ├── stripe/
+│   │   └── user/
 │   ├── hooks/
-│   │   └── useUserSession.ts          # WebSocket hook for UserSessionDO
+│   │   └── useUserSession.ts
 │   └── components/
-│       ├── theme/FantasyTheme.tsx     # UI component library (replace with your own)
-│       ├── Organizations/             # Org creation flow
-│       └── settings/                  # Account linking, settings UI
+│       └── settings/
 └── db.ts                              # Prisma client singleton
 ```
 
 ---
 
-## Extending the starter
+## Extending
 
-### Adding a new Durable Object
+### New Durable Object
 
 1. Create `src/durableObjects/myDO.ts` — model on `userSessionDO.ts`
 2. Export from `worker.tsx`: `export { MyDO } from './durableObjects/myDO'`
-3. Add binding in `wrangler.jsonc` under `durable_objects.bindings`
-4. Add migration in `wrangler.jsonc` under `migrations`
+3. Add to `wrangler.jsonc` under `durable_objects.bindings`
+4. Add migration under `migrations`
 5. Wire a route: `route("/__mydo", async ({ request }) => { ... })`
 
-### Adding a new API endpoint
+### New API endpoint
 
 ```ts
 // src/app/api/my-feature.ts
 export default async function({ request, ctx, params }: any) {
   return Response.json({ ok: true });
 }
+// → /api/my-feature immediately, no registration needed
 ```
 
-Live at `/api/my-feature` immediately.
-
-### Adding a new page
-
-Create a component in `src/app/pages/` and register it in `src/worker.tsx`:
+### New page
 
 ```ts
 import MyPage from "@/app/pages/MyPage";
 route("/my-page", MyPage),
 ```
+
+Add its policy to `src/lib/middleware/config.ts`:
+```ts
+{ prefix: "/my-page", policy: { level: "full" } },
+```
+
+### New server action
+
+```ts
+"use server";
+export async function myAction(input: string) {
+  return db.something.create({ data: { input } });
+}
+```
+
+### New static route
+
+Add to `src/app/pages/static/routes.ts` and add a `"public"` policy entry in `config.ts`. No worker changes needed.
 
 ---
 

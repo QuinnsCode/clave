@@ -1,6 +1,6 @@
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
-	"name": "my-app",
+	"name": "qlave",
 	"main": "src/worker.tsx",
 	"compatibility_date": "2025-08-21",
 	"compatibility_flags": [
@@ -11,8 +11,8 @@
 		"directory": "public"
 	},
 	"routes": [
-		// "example.com/*",
-		// "*.example.com/*"
+		"qlave.dev/*",
+		"*.qlave.dev/*"
 	],
 	"observability": {
 		"enabled": true
@@ -26,11 +26,25 @@
 			{
 				"name": "USER_SESSION_DO",
 				"class_name": "UserSessionDO"
-			}
+			},
+			{
+				"name": "QLAVE_SESSION_DO",
+				"class_name": "QlaveSessionDO"
+			},
+			{
+				"name": "RECORDING_COORDINATOR_DO",
+				"class_name": "RecordingCoordinatorDO"
+			},
+			{
+				"name": "QOLLAB_WHITEBOARD_DO",
+				"class_name": "QollabWhiteboardDO"
+			},
 		]
 	},
 	"vars": {
-		"BETTER_AUTH_URL": "https://example.com"
+		"BETTER_AUTH_URL": "https://qlave.dev",
+		"PRIMARY_DOMAIN": "qlave.dev",
+		"APP_NAME": "qlave"
 	},
 	"migrations": [
 		{
@@ -44,23 +58,83 @@
 			"new_sqlite_classes": [
 				"UserSessionDO"
 			]
+		},
+		{
+			"tag": "v3",
+			"new_sqlite_classes": [
+				"ClaveSessionDO"
+			]
+		},
+		{
+			"tag": "v4",
+			"renamed_classes": [
+				{
+					"from": "ClaveSessionDO",
+					"to": "QlaveSessionDO"
+				}
+			]
+		},
+		{
+			"tag": "v5",
+			"new_sqlite_classes": ["RecordingCoordinatorDO"]
+		},
+		{
+			"tag": "v6",
+			"new_sqlite_classes": ["QollabWhiteboardDO"]
 		}
 	],
 	"d1_databases": [
 		{
 			"binding": "DB",
-			"database_name": "my-app-db",
-			"database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+			"database_name": "qlave-db",
+			"database_id": "76bae891-9985-4e0d-accb-6c2207cfe514"
 		}
 	],
 	"kv_namespaces": [
 		{
 			"binding": "RATELIMIT_KV",
-			"id": "REPLACE_WITH_YOUR_KV_ID"
+			"id": "10d743cfe0614f9aac370dcbe097ec64"
 		},
 		{
 			"binding": "AUTH_CACHE_KV",
-			"id": "REPLACE_WITH_YOUR_KV_ID"
+			"id": "9ffb98e4b60341f0992009abe2bf2f8d"
+		}
+	],
+	"ai": {
+		"binding": "TRANSCRIPTION_AI",
+	},
+	"queues": {
+		"producers": [
+			{
+				"binding": "TRANSCRIPTION_USAGE_QUEUE",
+				"queue": "qlave-transcription-usage"
+			},
+			{
+				"binding": "RECORDING_QUEUE",
+				"queue": "qlave-recording-storage-queue"
+			}
+		],
+		"consumers": [
+			{
+				"queue": "qlave-transcription-usage",
+				"max_batch_size": 50,
+				"max_batch_timeout": 10
+			},
+			{
+				"queue": "qlave-recording-storage-queue",
+				"max_batch_size": 10,
+				"max_batch_timeout": 5
+			}
+		]
+	},
+	"r2_buckets": [
+		{
+			"binding": "SESSION_STORAGE",
+			"bucket_name": "qlave-sessions"
+		},
+		{
+			"binding": "RECORDING_BUCKET",
+			"bucket_name": "qlave-recordings"
 		}
 	]
 }

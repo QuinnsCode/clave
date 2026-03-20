@@ -1,28 +1,42 @@
+// src/worker.ts
 import { defineApp } from "rwsdk/worker";
 import { route, render, prefix } from "rwsdk/router";
-import { Document } from "@/app/Document";
-import { setCommonHeaders } from "@/app/headers";
-import { userRoutes } from "@/app/pages/user/routes";
-import { changelogRoute, aboutRoute, termsRoute } from "@/app/pages/staticRoutes";
-import { initAuth } from "@/lib/auth";
+import { env } from "cloudflare:workers";
 import { type Organization } from "@/db";
 import {
   initializeServices,
-  setupOrganizationContext,
-  setupSessionContext,
+  runMiddleware,
   extractOrgFromSubdomain,
-  shouldSkipMiddleware,
-} from "@/lib/middlewareFunctions";
-import { env } from "cloudflare:workers";
-import { verifyTurnstileToken } from "@/lib/turnstile";
+  getRouteHeaders,
+  setCommonHeaders,
+} from "@/lib/middleware";
+import { runAlertPoller } from "@/lib/alerts/poller";
+import { handleAlertQueue } from "@/lib/alerts/queue-consumer";
+import type { AlertQueueMessage } from "@/lib/alerts/queue-consumer";
+import { Document } from "@/app/Document";
+import { userRoutes } from "@/app/pages/user/routes";
+import { apiRoutes } from "@/app/api/routes";
+import { pokemonHoneypot } from "./lib/middleware/pokemonHoneypot";
+import { changelogRoute, aboutRoute, termsRoute } from "@/app/pages/staticRoutes";
+import type { SummarizeSessionMessage } from "@/app/workers/session-summary-worker";
 import OrgNotFoundPage from "@/app/pages/errors/OrgNotFoundPage";
 import NoAccessPage from "@/app/pages/errors/NoAccessPage";
 import LandingPage from "@/app/pages/landing/LandingPage";
-import SanctumPage from "@/app/pages/sanctum/SanctumPage";
+import QlaveTestPage from "@/app/pages/qlave-test/QlaveTestPage";
+import DashboardPage from "@/app/pages/dashboard/DashboardPage";
+import SessionPage from "@/app/pages/session/SessionPage";
+import RecapPage from "@/app/pages/session/RecapPage";
+import TranscribeTestPage from "@/app/pages/transcribe/TranscribeTestPage";
+import { LoginPage } from "@/app/pages/user/LoginPage";
+import SignupPage from "@/app/pages/user/SignupPage";
+import AdminUpgradePage from "@/app/pages/admin/AdminUpgradePage";
+import TestPage from "@/app/pages/test/TestPage";
 
 // ── Durable Object exports ────────────────────────────────────────────────────
 export { SessionDurableObject } from "./session/durableObject";
+export { QlaveSessionDO } from "./durableObjects/qlaveSessionDO";
 export { UserSessionDO } from "./durableObjects/userSessionDO";
+export { RecordingCoordinatorDO } from "./durableObjects/recordingCoordinatorDO";
 
 // ── App context type ──────────────────────────────────────────────────────────
 export type AppContext = {
@@ -34,101 +48,66 @@ export type AppContext = {
 };
 
 // ── URL normalization ─────────────────────────────────────────────────────────
-// Strips www and forces HTTPS in production.
-// Set PRIMARY_DOMAIN to your domain — subdomains are used for org scoping.
+
 function normalizeUrl(request: Request): Response | null {
   const url = new URL(request.url);
   const PRIMARY_DOMAIN = (env as any).PRIMARY_DOMAIN || "example.com";
-  const isLocalhost = url.hostname.includes("localhost");
-
-  if (isLocalhost) return null;
+  if (url.hostname.includes("localhost")) return null;
 
   let shouldRedirect = false;
   let newHostname = url.hostname;
   let newProtocol = url.protocol;
 
-  if (url.protocol === "http:") {
-    newProtocol = "https:";
-    shouldRedirect = true;
-  }
-
-  if (url.hostname === `www.${PRIMARY_DOMAIN}`) {
-    newHostname = PRIMARY_DOMAIN;
-    shouldRedirect = true;
-  }
+  if (url.protocol === "http:") { newProtocol = "https:"; shouldRedirect = true; }
+  if (url.hostname === `www.${PRIMARY_DOMAIN}`) { newHostname = PRIMARY_DOMAIN; shouldRedirect = true; }
 
   if (shouldRedirect) {
     return new Response(null, {
       status: 301,
-      headers: {
-        Location: `${newProtocol}//${newHostname}${url.pathname}${url.search}${url.hash}`,
-      },
+      headers: { Location: `${newProtocol}//${newHostname}${url.pathname}${url.search}${url.hash}` },
     });
   }
-
   return null;
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
-export default defineApp([
+const app = defineApp([
   setCommonHeaders(),
 
-  // 1. URL normalization — always first
   async ({ request }) => {
     const redirect = normalizeUrl(request);
     if (redirect) return redirect;
   },
 
-  /**
-   * ⚠️ CRITICAL MIDDLEWARE CHAIN — DO NOT REORDER ⚠️
-   *
-   * Sets up ctx.user, ctx.organization, ctx.userRole on every request.
-   *
-   * Order matters:
-   *   1. initializeServices()       — DB + auth singleton setup
-   *   2. setupSessionContext()      — reads BetterAuth cookie → ctx.user
-   *   3. setupOrganizationContext() — reads subdomain → ctx.organization
-   *   4. autoCreateOrgMiddleware()  — creates org for new users, redirects
-   *
-   * Breaking this order causes:
-   *   - Login redirect failures
-   *   - "No Organization" errors on valid subdomains
-   *   - ctx.organization null on org subdomains
-   *
-   * DO NOT:
-   *   ❌ Add shouldRunMiddleware conditionals
-   *   ❌ Swap steps 2 and 3
-   *   ❌ Remove autoCreateOrgMiddleware
-   *   ❌ Add new middleware without testing the full login flow
-   *
-   * CACHE NOTE:
-   *   AUTH_CACHE_KV has 5-10 min TTL. If org appears missing after creation,
-   *   wait or flush KV manually.
-   */
-  async ({ ctx, request }) => {
+  async ({ request }) => {
+    const url = new URL(request.url);
+    if (url.hostname === "cdn.qlave.dev") return fetch(request);
+  },
+
+  async ({ ctx, request, response }: { ctx: AppContext; request: Request; response: ResponseInit & { headers: Headers } }) => {
+    const { pathname } = new URL(request.url);
+    for (const [key, value] of Object.entries(getRouteHeaders(pathname))) {
+      response.headers.set(key, value);
+    }
+
     try {
       await initializeServices();
 
-      if (shouldSkipMiddleware(request)) return;
+      const redirect = await runMiddleware(ctx, request);
+      if (redirect) return redirect;
 
-      await setupSessionContext(ctx, request);
-      await setupOrganizationContext(ctx, request);
-
-      const { autoCreateOrgMiddleware } = await import(
-        "@/lib/middleware/autoCreateOrgMiddleware"
-      );
-      const result = await autoCreateOrgMiddleware(ctx, request);
-      if (result) return result;
-
-      // Org error handling — redirect appropriately
-      if (
-        ctx.orgError &&
-        !request.url.includes("/api/") &&
-        !request.url.includes("/__") &&
-        !request.url.includes("/user/") &&
-        !request.url.includes("/orgs/new")
-      ) {
+      if (ctx.orgError) {
         const url = new URL(request.url);
+        if (
+          url.pathname.startsWith("/api/") ||
+          url.pathname.startsWith("/__") ||
+          url.pathname.startsWith("/user/") ||
+          url.pathname.startsWith("/login") ||
+          url.pathname.startsWith("/signup") ||
+          url.pathname.startsWith("/orgs/new") ||
+          url.pathname.startsWith("/s")
+        ) return;
+
         const mainDomain = url.hostname.includes("localhost")
           ? "localhost:5173"
           : (env as any).PRIMARY_DOMAIN || "example.com";
@@ -137,198 +116,151 @@ export default defineApp([
           const orgSlug = extractOrgFromSubdomain(request);
           return new Response(null, {
             status: 302,
-            headers: {
-              Location: `${url.protocol}//${mainDomain}/orgs/new?suggested=${orgSlug}`,
-            },
+            headers: { Location: `${url.protocol}//${mainDomain}/orgs/new?suggested=${orgSlug}` },
           });
         }
-
         if (ctx.orgError === "NO_ACCESS") {
-          return new Response(null, {
-            status: 302,
-            headers: { Location: "/user/login" },
-          });
+          return new Response(null, { status: 302, headers: { Location: "/login" } });
         }
       }
+
+      const { autoCreateOrgMiddleware } = await import("@/lib/middleware/autoCreateOrgMiddleware");
+      const result = await autoCreateOrgMiddleware(ctx, request);
+      if (result) return result;
+
     } catch (error) {
       console.error("Middleware error:", error);
-      ctx.session = null;
-      ctx.user = null;
+      ctx.session      = null;
+      ctx.user         = null;
       ctx.organization = null;
-      ctx.userRole = null;
-      ctx.orgError = null;
+      ctx.userRole     = null;
+      ctx.orgError     = null;
     }
   },
 
-  // ── User Session DO — WebSocket + Hibernation API example ──────────────────
-  // Connect: ws://your-domain/__user-session?userId=xxx&deviceId=yyy
-  // See src/durableObjects/userSessionDO.ts for the full pattern.
-  route("/__user-session", async ({ request }) => {
-    const url = new URL(request.url);
+  // ── Internal DO routes ────────────────────────────────────────────────────
+
+  route("/__user-session", async ({ request, ctx }: { request: Request; ctx: AppContext }) => {
+    const url    = new URL(request.url);
     const userId = url.searchParams.get("userId");
-
-    if (!userId) {
-      return new Response("Missing userId", { status: 400 });
+    if (!userId) return new Response("Missing userId", { status: 400 });
+  
+    // WebSocket upgrades come from the client — verify the requesting user owns this DO
+    // Skip auth for internal server-to-DO calls (no user in ctx)
+    if (ctx.user && ctx.user.id !== userId) {
+      return new Response("Unauthorized", { status: 401 });
     }
-
+  
     const id = env.USER_SESSION_DO.idFromName(userId);
-    const stub = env.USER_SESSION_DO.get(id);
-    return stub.fetch(request);
+    return env.USER_SESSION_DO.get(id).fetch(request);
   }),
 
-  // ── API routes ──────────────────────────────────────────────────────────────
-  prefix("/api", [
-    // Stripe checkout
-    route("/stripe/create-checkout", async ({ request, ctx }) => {
-      const { default: handler } = await import(
-        "@/app/api/stripe/create-checkout"
-      );
-      return handler({ request, ctx } as any);
-    }),
+  route("/__qlave/:code", async ({ request, params }) => {
+    const id = env.QLAVE_SESSION_DO.idFromName(params.code);
+    return env.QLAVE_SESSION_DO.get(id).fetch(request);
+  }),
 
-    // BetterAuth — Turnstile bot protection on signup
-    route("/auth/*", async ({ request }) => {
-      try {
-        if (request.url.includes("/sign-up") && request.method === "POST") {
-          const body = await request.clone().json() as any;
-          if (body.turnstileToken) {
-            const isValid = await verifyTurnstileToken(body.turnstileToken);
-            if (!isValid) {
-              return new Response(
-                JSON.stringify({ error: "Bot protection verification failed" }),
-                { status: 400, headers: { "Content-Type": "application/json" } }
-              );
-            }
-          }
-        }
+  // ── API routes ────────────────────────────────────────────────────────────
 
-        await initializeServices();
-        const authInstance = initAuth();
-        return await authInstance.handler(request);
-      } catch (error) {
-        return new Response(
-          JSON.stringify({ error: "Auth failed", message: String(error) }),
-          { status: 500, headers: { "Content-Type": "application/json" } }
-        );
-      }
-    }),
+  prefix("/api", apiRoutes),
 
-    // Webhooks
-    route("/webhooks/:service", async ({ request, params, ctx }) => {
-      if (params.service === "stripe") {
-        const { default: handler } = await import(
-          "@/app/api/webhooks/stripe-wh"
-        );
-        return handler({ request });
-      }
-      if (params.service === "lemonsqueezy") {
-        const { default: handler } = await import(
-          "@/app/api/webhooks/lemonsqueezy-wh"
-        );
-        return handler({ request, ctx });
-      }
-      return Response.json({ error: "Webhook not supported" }, { status: 404 });
-    }),
+  // honeypots lol
 
-    // Catch-all dynamic API loader — drop a file in src/app/api/ and it's live
-    route("*", async ({ request, params, ctx }) => {
-      const apiPath = params.$0;
+  route("/wordpress", pokemonHoneypot),
+  route("/wordpress/$", pokemonHoneypot),  // catch /wordpress/anything
+  route("/wp", pokemonHoneypot),
+  route("/wp/$", pokemonHoneypot),
+  route("/wp-admin", pokemonHoneypot),
+  route("/wp-admin/$", pokemonHoneypot),
 
-      if (!apiPath) {
-        return new Response(
-          JSON.stringify({ error: "API endpoint not specified" }),
-          { status: 400, headers: { "Content-Type": "application/json" } }
-        );
-      }
+  // ── Frontend routes ───────────────────────────────────────────────────────
 
-      try {
-        const handler = await import(
-          /* @vite-ignore */ `@/app/api/${apiPath}`
-        );
-        return await handler.default({ request, ctx, params, method: request.method });
-      } catch (error: any) {
-        if (error.message?.includes("Cannot resolve module")) {
-          return new Response(
-            JSON.stringify({ error: "API endpoint not found", path: `/api/${apiPath}` }),
-            { status: 404, headers: { "Content-Type": "application/json" } }
-          );
-        }
-        return new Response(
-          JSON.stringify({ error: "Internal server error", message: error.message }),
-          { status: 500, headers: { "Content-Type": "application/json" } }
-        );
-      }
-    }),
-  ]),
-
-  // ── Frontend routes ─────────────────────────────────────────────────────────
   render(Document, [
     route("/org-not-found", OrgNotFoundPage),
     route("/no-access", NoAccessPage),
 
+    route("/cost-calculator", TestPage),
+    route("/login",  LoginPage),
+    route("/signup", SignupPage),
     prefix("/user", userRoutes),
 
     changelogRoute,
     aboutRoute,
     termsRoute,
 
-    // Authenticated home — replace with your app's main page
-    route("/sanctum", SanctumPage),
+    route("/dashboard", DashboardPage),
 
-    // Root — landing for main domain, redirect to /sanctum for org subdomains
-    route("/", [
-      ({ ctx, request }) => {
-        const url = new URL(request.url);
-        if (url.pathname !== "/") return;
-
-        const orgSlug = extractOrgFromSubdomain(request);
-        if (!orgSlug) return; // main domain → fall through to LandingPage
-
-        if (ctx.orgError) return;
-
-        if (ctx.organization && (!ctx.user || !ctx.userRole)) {
-          return new Response(null, {
-            status: 302,
-            headers: { Location: "/user/login" },
-          });
-        }
-
-        if (ctx.organization && ctx.user && ctx.userRole) {
-          return new Response(null, {
-            status: 302,
-            headers: { Location: "/sanctum" },
-          });
-        }
-      },
-      LandingPage,
+    prefix("/admin", [
+      route("/upgrade", AdminUpgradePage),
     ]),
+    route("/qlave-test", QlaveTestPage),
+    route("/transcribe-test", TranscribeTestPage),
+    route("/s", SessionPage),
+    route("/s/:code", SessionPage),
+    route("/s/:code/recap", RecapPage),
 
-    // Catch-all — redirect unknown paths to home
-    route("/*", ({ request }) => {
-      const url = new URL(request.url);
+    route("/", LandingPage),
+
+    route("/*", ({ request }: { request: Request }) => {
+      const { pathname } = new URL(request.url);
       if (
-        url.pathname.startsWith("/api/") ||
-        url.pathname.startsWith("/__") ||
-        url.pathname.startsWith("/webhooks/")
-      ) {
-        return;
-      }
-      return new Response(null, {
-        status: 301,
-        headers: { Location: "/" },
-      });
+        pathname.startsWith("/qlave-test") ||
+        pathname.startsWith("/transcribe-test") ||
+        pathname.startsWith("/api/") ||
+        pathname.startsWith("/__") ||
+        pathname.startsWith("/dashboard") ||
+        pathname.startsWith("/webhooks/") ||
+        pathname.startsWith("/s")
+      ) return;
+      return new Response(null, { status: 301, headers: { Location: "/" } });
     }),
   ]),
 ]);
 
-// ── Reference: adding a new DO ────────────────────────────────────────────────
-// 1. Create src/durableObjects/myDO.ts (model on userSessionDO.ts)
-// 2. Export it here:        export { MyDO } from './durableObjects/myDO'
-// 3. Add binding in wrangler.jsonc under [[durable_objects.bindings]]
-// 4. Add migration in wrangler.jsonc under [[migrations]]
-// 5. Wire a route:          route("/__mydo", async ({ request }) => { ... })
+export default {
+  fetch: app.fetch,
 
-// ── Reference: adding a new API endpoint ─────────────────────────────────────
-// Drop a file at src/app/api/my-endpoint.ts with a default export:
-//   export default async function({ request, ctx, params }) { ... }
-// It's automatically available at /api/my-endpoint — no route registration needed.
+  // ── Cron ─────────────────────────────────────────────────────────────────
+  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil(runAlertPoller(env));
+  },
+
+  // ── Queues ────────────────────────────────────────────────────────────────
+  async queue(batch: MessageBatch<unknown>, env: Env, _ctx: ExecutionContext) {
+    if (batch.queue === "ALERT_QUEUE") {
+      return handleAlertQueue(batch as MessageBatch<AlertQueueMessage>, env);
+    }
+
+    // ── Recording assembly — dynamic import, only loads when this queue fires
+    if (batch.queue === "qlave-recording-storage-queue") {
+      const { handleRecordingQueue } = await import("@/lib/plugins/recording/queue");
+      return handleRecordingQueue(batch as MessageBatch<any>, env);
+    }
+
+    const summarizeMessages = batch.messages.filter(m => (m.body as any)?.type === "summarize-session");
+    const usageMessages     = batch.messages.filter(m => (m.body as any)?.type !== "summarize-session");
+
+    for (const msg of summarizeMessages) {
+      try {
+        const { handleSummarizeSession } = await import("@/app/workers/session-summary-worker");
+        await handleSummarizeSession(msg.body as SummarizeSessionMessage, env);
+        msg.ack();
+      } catch (e) {
+        console.error("[queue] summarize-session failed:", e);
+        msg.retry();
+      }
+    }
+
+    if (usageMessages.length > 0) {
+      const { default: handler } = await import("@/app/workers/transcription-usage-worker");
+      for (const msg of usageMessages) {
+        try {
+          await handler.queue({ messages: [msg], queue: batch.queue } as any);
+          msg.ack();
+        } catch (e) {
+          msg.retry();
+        }
+      }
+    }
+  },
+} satisfies ExportedHandler<Env>;

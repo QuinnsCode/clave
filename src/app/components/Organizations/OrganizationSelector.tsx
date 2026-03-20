@@ -148,10 +148,10 @@ export function OrganizationSelector() {
         </button>
         <button
           type="button"
-          onClick={() => handleQuickSelect("sanctum")}
+          onClick={() => handleQuickSelect("dashboard")}
           className="px-4 py-3 text-sm border border-amber-600/50 bg-black/30 text-amber-200 rounded-lg hover:bg-amber-900/30 hover:border-amber-500 focus:outline-none focus:ring-2 focus:ring-amber-500 transition-all duration-200"
         >
-          🔮 Sanctum
+          🔮 Dashboard
         </button>
       </div>
     </form>

@@ -40,6 +40,7 @@ model User {
   members     Member[]
   invitations Invitation[]
   apikeys     Apikey[]
+  sites       Site[]
 
   stripeSubscription  StripeSubscription?
   squeezeSubscription SqueezeSubscription?
@@ -125,6 +126,9 @@ model Organization {
   invitations Invitation[]
   teams       Team[]
   apikeys     Apikey[]
+  sites    Site[]
+  plugins  OrgPlugin[]
+  transcriptionUsage TranscriptionUsage[]
 
   @@map("organization")
 }
@@ -266,4 +270,145 @@ model SqueezeSubscription {
   @@index([status])
   @@index([lemonSqueezySubscriptionId])
   @@map("squeeze_subscriptions")
+}
+
+model Site {
+  id        String   @id @default(uuid())
+  siteKey   String   @unique @map("site_key")
+  userId    String   @map("user_id")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String?
+  domains   String   @default("") // comma-separated, SQLite has no array type
+  organizationId String? @map("organization_id")
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@index([siteKey])
+  @@map("site")
+}
+
+model QlaveSessionLog {
+  id           String    @id @default(uuid())
+  siteKey      String    @map("site_key")
+  sessionId    String    @map("session_id")
+  startedAt    DateTime  @map("started_at")
+  endedAt      DateTime? @map("ended_at")
+  peakPeers    Int       @default(0) @map("peak_peers")
+  messageCount Int       @default(0) @map("message_count")
+  durationMs   Int?      @map("duration_ms")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  @@index([siteKey])
+  @@index([startedAt])
+  @@index([sessionId])
+  @@map("qlave_session_log")
+}
+
+// ── New models ────────────────────────────────────────────────────────────────
+
+model OrgPlugin {
+  id             String       @id @default(uuid())
+  organizationId String       @map("organization_id")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  plugin         String       // "transcription" | "recording" | "summary" — extensible
+  enabled        Boolean      @default(true)
+
+  // mode: sample = 1min demo, trial = time+usage gated, active = paid
+  mode           String       @default("sample") // "sample" | "trial" | "active"
+
+  // tier maps to model + cap — abstracted from user
+  tier           String       @default("free") // "free" | "starter" | "pro" | "scale"
+
+  // trial gates — whichever hits first
+  trialStartedAt DateTime?    @map("trial_started_at")
+  trialEndsAt    DateTime?    @map("trial_ends_at")     // trialStartedAt + 14 days
+  trialMinuteCap Int          @default(60)              @map("trial_minute_cap")
+
+  // per-user kill switch — null = no per-user limit enforced (org cap only)
+  maxMinutesPerUser Int?      @map("max_minutes_per_user")
+
+  // config blob for plugin-specific settings (JSON string, SQLite has no JSON type)
+  config         String?      // e.g. {"defaultLanguage":"en","allowModelSelect":false}
+
+  createdAt      DateTime     @default(now()) @map("created_at")
+  updatedAt      DateTime     @updatedAt      @map("updated_at")
+
+  @@unique([organizationId, plugin])
+  @@index([organizationId])
+  @@map("org_plugin")
+}
+
+model TranscriptionUsage {
+  id             String   @id @default(uuid())
+
+  // identity — always both, enforce at either level
+  organizationId String   @map("organization_id")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId         String   @map("user_id")
+  sessionId      String?  @map("session_id")   // null = test page / API call
+  siteKey        String   @map("site_key")
+
+  // what was used
+  model          String   // full model id e.g. "@cf/openai/whisper-large-v3-turbo"
+  audioSeconds   Float    @map("audio_seconds")
+  neuronsUsed    Float    @map("neurons_used")
+  costUsd        Float    @map("cost_usd")
+
+  // mode at time of request — for analytics
+  mode           String   // "sample" | "trial" | "active"
+
+  recordedAt     DateTime @default(now()) @map("recorded_at")
+
+  @@index([organizationId])
+  @@index([userId])
+  @@index([organizationId, recordedAt])  // main analytics query
+  @@index([model, recordedAt])           // cost-per-model query
+  @@index([sessionId])
+  @@map("transcription_usage")
+}
+// Add these two models to the bottom of your schema.prisma
+
+model SessionTranscript {
+  id        String   @id @default(uuid())
+  sessionId String   @map("session_id")
+  siteKey   String   @map("site_key")
+  chunks    String   // JSON array of {peerId, displayName, text, timestamp}
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([sessionId])
+  @@index([siteKey])
+  @@map("session_transcript")
+}
+
+model SessionSummary {
+  id        String   @id @default(uuid())
+  sessionId String   @map("session_id")
+  siteKey   String   @map("site_key")
+  summary   String   // JSON: {tldr, keyMoments, actionItems, speakerSummary, topics}
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt      @map("updated_at")
+
+  @@index([sessionId])
+  @@index([siteKey])
+  @@map("session_summary")
+}
+
+model RecordingManifest {
+  id          String   @id @default(uuid())
+  sessionId   String   @unique @map("session_id")
+  orgId       String   @map("org_id")
+  siteKey     String   @map("site_key")
+  r2Key       String   @map("r2_key")       // R2 key of session.json manifest
+  peerCount   Int      @default(0) @map("peer_count")
+  assembledAt DateTime? @map("assembled_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([orgId])
+  @@index([sessionId])
+  @@index([siteKey])
+  @@map("recording_manifest")
 }

@@ -168,7 +168,7 @@ export function CreateOrgClient({ initialUser }: CreateOrgClientProps) {
                     placeholder="golden-dragon"
                   />
                   <span className="inline-flex blur-xs items-center px-4 py-3 border-2 border-l-0 border-amber-700/50 bg-slate-800/70 text-amber-300/60 text-sm font-mono rounded-r-lg">
-                    .qntbr.com
+                    .qlave.dev
                   </span>
                 </div>
                 <p className="mt-2 text-xs text-amber-300/70">
@@ -176,7 +176,7 @@ export function CreateOrgClient({ initialUser }: CreateOrgClientProps) {
                     <span className="mr-1">📍</span>
                     Your lair will be at: <span className="font-mono ml-1">https://[your-seal]</span>
                   </span>
-                  <span className="inline-flex blur-xs mx-1 font-mono">.qntbr.com</span>
+                  <span className="inline-flex blur-xs mx-1 font-mono">.qlave.dev</span>
                 </p>
                 <p className="mt-1 text-xs text-amber-400/60 italic">
                   Use only lowercase letters, numbers, and hyphens
