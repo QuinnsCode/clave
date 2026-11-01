@@ -79,12 +79,12 @@ function normalizeUrl(request: Request): Response | null {
 const app = defineApp([
   setCommonHeaders(),
 
-  async ({ request }) => {
+  async ({ request }: { request: Request }) => {
     const redirect = normalizeUrl(request);
     if (redirect) return redirect;
   },
 
-  async ({ request }) => {
+  async ({ request }: { request: Request }) => {
     const url = new URL(request.url);
     if (url.hostname === "cdn.qlave.dev") return fetch(request);
   },
@@ -160,9 +160,12 @@ const app = defineApp([
     return env.USER_SESSION_DO.get(id).fetch(request);
   }),
 
-  route("/__qlave/:code", async ({ request, params }) => {
-    const id = env.QLAVE_SESSION_DO.idFromName(params.code);
-    return env.QLAVE_SESSION_DO.get(id).fetch(request);
+  route("/__qlave/:sessionId", async ({ request, params }) => {
+    const { authorizeSignaling, forwardToSession } = await import("@/lib/qlave/signalingGate");
+    const auth = await authorizeSignaling(request, params.sessionId);
+    if (auth instanceof Response) return auth;
+    const id = env.QLAVE_SESSION_DO.idFromName(params.sessionId);
+    return env.QLAVE_SESSION_DO.get(id).fetch(forwardToSession(request, auth));
   }),
   
   route("/__qollab/:sessionId", async ({ request, params }) => {
@@ -278,14 +281,16 @@ export default {
         }
  
         if (usage.length > 0) {
-          const { default: handler } = await import("@/app/workers/transcription-usage-worker");
-          for (const msg of usage) {
-            try {
-              await handler.queue({ messages: [msg], queue: batch.queue } as any);
-              msg.ack();
-            } catch {
-              msg.retry();
-            }
+          // One insert for the batch; ack only after it lands so rows are written once.
+          // (Handing the consumer a fake batch made its ackAll() throw after the insert,
+          // so every row was retried and written again.)
+          const { writeUsageRows } = await import("@/app/workers/transcription-usage-worker");
+          try {
+            await writeUsageRows(usage.map(m => m.body as any));
+            for (const m of usage) m.ack();
+          } catch (e) {
+            console.error("[queue] usage insert failed:", e);
+            for (const m of usage) m.retry();
           }
         }
         return;

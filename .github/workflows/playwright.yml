@@ -6,22 +6,31 @@ on:
     branches: [ main, master ]
 jobs:
   test:
-    timeout-minutes: 60
+    timeout-minutes: 30
     runs-on: ubuntu-latest
+    env:
+      # Run fully offline: no Workers AI proxy (needs Cloudflare credentials), no container build.
+      QLAVE_LOCAL_ONLY: "1"
     steps:
     - uses: actions/checkout@v4
+    - uses: pnpm/action-setup@v4  # version comes from package.json packageManager
     - uses: actions/setup-node@v4
       with:
-        node-version: lts/*
+        node-version: 22
+        cache: pnpm
     - name: Install dependencies
-      run: npm install -g pnpm && pnpm install
-    - name: Install Playwright Browsers
-      run: pnpm exec playwright install --with-deps
-    - name: Run Playwright tests
-      run: pnpm exec playwright test
+      run: pnpm install --frozen-lockfile
+    - name: Install Playwright Chromium
+      run: pnpm exec playwright install --with-deps chromium
+    - name: Local dev vars
+      run: printf 'BETTER_AUTH_SECRET=ci-only-secret-0123456789abcdef0123456789\nQLAVE_TICKET_SECRET=ci-only-ticket-secret-0123456789abcdef\n' > .dev.vars
+    - name: Local database
+      run: pnpm exec prisma generate && pnpm exec wrangler d1 migrations apply DB --local
+    - name: Run video call e2e
+      run: pnpm exec playwright test tests/e2e --project=chromium
     - uses: actions/upload-artifact@v4
       if: ${{ !cancelled() }}
       with:
         name: playwright-report
         path: playwright-report/
-        retention-days: 30
+        retention-days: 14

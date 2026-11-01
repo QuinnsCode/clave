@@ -76,6 +76,45 @@ export const apiRoutes = [
     return handler({ request, ctx });
   }),
 
+  route("/qlave/test-ticket", async ({ request, ctx }) => {
+    const { default: handler } = await import("@/app/api/qlave/testTicket");
+    return handler({ request, ctx });
+  }),
+
+  route("/qlave/ice", async ({ request }) => {
+    const { default: handler } = await import("@/app/api/qlave/ice");
+    return handler({ request });
+  }),
+
+  // ── Headless v1 (eqosys bearer) ───────────────────────────────────────────
+
+  route("/v1/rooms", async ({ request }) => {
+    const h = await import("@/app/api/v1/handlers");
+    if (request.method === "OPTIONS") return h.preflight();
+    if (request.method !== "POST") return Response.json({ error: "Method not allowed" }, { status: 405, headers: h.CORS });
+    return h.createRoomV1(request);
+  }),
+
+  route("/v1/rooms/:id/join", async ({ request, params }) => {
+    const h = await import("@/app/api/v1/handlers");
+    if (request.method === "OPTIONS") return h.preflight();
+    if (request.method !== "POST") return Response.json({ error: "Method not allowed" }, { status: 405, headers: h.CORS });
+    return h.joinRoomV1(request, params.id);
+  }),
+
+  route("/v1/ice", async ({ request }) => {
+    const h = await import("@/app/api/v1/handlers");
+    if (request.method === "OPTIONS") return h.preflight();
+    return h.iceV1(request);
+  }),
+
+  route("/v1/transcribe", async ({ request }) => {
+    const h = await import("@/app/api/v1/handlers");
+    if (request.method === "OPTIONS") return h.preflight();
+    if (request.method !== "POST") return Response.json({ error: "Method not allowed" }, { status: 405, headers: h.CORS });
+    return h.transcribeV1(request);
+  }),
+
   // ── Recording ─────────────────────────────────────────────────────────────
 
   prefix("/recording", recordingRoutes),

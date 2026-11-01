@@ -99,11 +99,13 @@ export const ROUTE_POLICIES: Array<{ prefix: string; policy: RoutePolicy; force?
   { prefix: "/user/logout",          policy: { level: "public" } },
   { prefix: "/api/auth/",            policy: { level: "public" } },
   { prefix: "/api/webhooks/",        policy: { level: "public" } },
+  { prefix: "/api/v1/",              policy: { level: "public" } },   // bearer eqosys token, checked per handler
+  { prefix: "/api/qlave/ice",        policy: { level: "public" } },   // room code checked in handler
   { prefix: "/landing",              policy: { level: "public" } },
 
   // ── AV + AI routes ─────────────────────────────────────────────────────────
   { prefix: "/s",                    policy: POLICY.avAiPublic },
-  { prefix: "/qlave-test",           policy: POLICY.avAi },
+  { prefix: "/qlave-test",           policy: { ...POLICY.avAi, level: "session" } }, // signed in; no org needed
   { prefix: "/transcribe-test",      policy: POLICY.avAi },
 
   // ── Session only — ctx.user, no org ───────────────────────────────────────

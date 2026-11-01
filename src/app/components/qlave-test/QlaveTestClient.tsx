@@ -2,8 +2,10 @@
 // src/app/components/qlave-test/QlaveTestClient.tsx
 
 import { useState, useEffect, useRef } from "react";
-import { QlaveSession } from "@/lib/qlave/session";
-import type { Peer, Status } from "@/lib/qlave/types";
+import { QlaveCall, type RemotePeer } from "@/sdk/qlaveCall";
+import { useEarlyInput } from "@/app/hooks/useEarlyInput";
+
+type Status = "idle" | "acquiring" | "connecting" | "ready" | "connected" | "error" | "disconnected";
 import { Drum } from "lucide-react";
 
 // ── Styles (unchanged) ────────────────────────────────────────────────────────
@@ -18,7 +20,7 @@ const CSS = `
 
   :root {
     --purple:   #7c3aed;
-    --purple-l: #a78bfa;xw
+    --purple-l: #a78bfa;
     --purple-g: rgba(124,58,237,0.28);
     --bg:       #080810;
     --bg-2:     #0d0d1a;
@@ -122,37 +124,69 @@ function VideoTile({ stream, label, isLocal }: { stream: MediaStream | null; lab
 export default function QlaveTestClient() {
   const [sessionId, setSessionId] = useState("test-1");
   const [displayName, setDisplayName] = useState("");
+  const sessionIdRef = useEarlyInput(sessionId, setSessionId);
+  const displayNameRef = useEarlyInput(displayName, setDisplayName);
   const [status, setStatus] = useState<Status>("idle");
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
-  const [peers, setPeers] = useState<Peer[]>([]);
+  const [peers, setPeers] = useState<RemotePeer[]>([]);
   const [error, setError] = useState<string | null>(null);
 
-  const sessionRef = useRef<QlaveSession | null>(null);
+  const callRef = useRef<QlaveCall | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
   const name = displayName.trim() || "you";
 
-  const join = () => {
-    const session = new QlaveSession(
-      { sessionId, displayName, siteKey: "platform" },
-      {
-        onStatusChange: (s, err) => { setStatus(s); setError(err ?? null); },
-        onLocalStream: (stream) => setLocalStream(stream),
-        onPeerJoined: (peer) => setPeers(prev => [...prev, peer]),
-        onPeerUpdated: (peer) => setPeers(prev => prev.map(p => p.id === peer.id ? peer : p)),
-        onPeerLeft: (peerId) => setPeers(prev => prev.filter(p => p.id !== peerId)),
-      }
-    );
-    sessionRef.current = session;
-    void session.join();
+  const join = async () => {
+    setError(null);
+    setStatus("acquiring");
+    let stream: MediaStream | null = null;
+    try { stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true }); }
+    catch { try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); } catch { /* receive only */ } }
+    streamRef.current = stream;
+    setLocalStream(stream);
+
+    setStatus("connecting");
+    const res = await fetch("/api/qlave/test-ticket", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId, name: displayName.trim() || undefined }),
+    });
+    const data = await res.json().catch(() => ({})) as { signalingUrl?: string; iceServers?: RTCIceServer[]; error?: string };
+    if (!res.ok || !data.signalingUrl) {
+      setStatus("error");
+      setError(data.error ?? `Could not get a ticket (${res.status})`);
+      return;
+    }
+
+    const call = new QlaveCall({ signalingUrl: data.signalingUrl, iceServers: data.iceServers, localStream: stream, name });
+    callRef.current = call;
+    const sync = () => {
+      setPeers(call.remotePeers);
+      setStatus(call.remotePeers.length > 0 ? "connected" : "ready");
+    };
+    for (const t of ["peer-joined", "peer-stream", "peer-updated", "peer-left", "joined"]) call.addEventListener(t, sync);
+    call.addEventListener("state", e => {
+      const st = (e as CustomEvent).detail.state;
+      if (st === "reconnecting") setStatus("connecting");
+      if (st === "left") setStatus("disconnected");
+    });
+    call.addEventListener("error", e => { setStatus("error"); setError((e as CustomEvent).detail.message); });
+    call.join().catch(() => { /* surfaced via "error" */ });
   };
 
   const leave = () => {
-    sessionRef.current?.leave();
-    sessionRef.current = null;
+    callRef.current?.leave();
+    callRef.current = null;
+    streamRef.current?.getTracks().forEach(t => t.stop());
+    streamRef.current = null;
     setLocalStream(null);
     setPeers([]);
+    setStatus("disconnected");
   };
 
-  useEffect(() => () => { sessionRef.current?.leave(); }, []);
+  useEffect(() => () => {
+    callRef.current?.leave();
+    streamRef.current?.getTracks().forEach(t => t.stop());
+  }, []);
 
   const isActive = !["idle", "disconnected", "error"].includes(status);
   const totalTiles = (isActive ? 1 : 0) + peers.length;
@@ -161,12 +195,12 @@ export default function QlaveTestClient() {
 
   return (
     <div className="page">
-      <style dangerouslySetInnerHTML={{ __html: CSS }} />
+      <style href="qlave-test-css" precedence="default">{CSS}</style>
       <nav className="nav">
         <a href="/"><span className="pill"><Drum size={13} strokeWidth={2.5} /> qlave</span></a>
         <div className="nav-right">
           <span className="badge-dev">dev mode</span>
-          <span className="nav-hint">/__qlave/:sessionId</span>
+          <span className="nav-hint">/__qlave/test-{sessionId}</span>
         </div>
       </nav>
       <main className="main">
@@ -182,11 +216,11 @@ export default function QlaveTestClient() {
             <div className="fields">
               <div className="field">
                 <span className="field-label">Session ID</span>
-                <input className="field-input" value={sessionId} onChange={e => setSessionId(e.target.value)} placeholder="test-1" spellCheck={false} />
+                <input ref={sessionIdRef} className="field-input" defaultValue="test-1" onChange={e => setSessionId(e.target.value)} placeholder="test-1" spellCheck={false} />
               </div>
               <div className="field">
                 <span className="field-label">Display name</span>
-                <input className="field-input" value={displayName} onChange={e => setDisplayName(e.target.value)} placeholder="Aragorn" />
+                <input ref={displayNameRef} className="field-input" defaultValue="" onChange={e => setDisplayName(e.target.value)} placeholder="Aragorn" />
               </div>
             </div>
             <span className="config-hint">Share the same Session ID with another tab to connect.</span>
@@ -196,7 +230,7 @@ export default function QlaveTestClient() {
         <div className="video-wrap">
           <div className="video-grid" style={{ gridTemplateColumns: `repeat(${cols}, 1fr)` }}>
             {isActive && <VideoTile stream={localStream} label={name} isLocal />}
-            {peers.map(p => <VideoTile key={p.id} stream={p.stream} label={p.id.slice(0, 8)} />)}
+            {peers.map(p => <VideoTile key={p.peerId} stream={p.stream.getTracks().length ? p.stream : null} label={p.name} />)}
             {!isActive && (
               <div className="idle-state">
                 <div className="idle-icon"><Drum size={13} strokeWidth={2.5} /></div>
@@ -222,7 +256,7 @@ export default function QlaveTestClient() {
           {[
             { icon: "⚡", title: "Peer-to-peer", body: "Video and audio travel directly between browsers. The DO routes offer/answer/ICE only — it never sees a media frame." },
             { icon: "🛏", title: "Hibernating DO", body: "QlaveSessionDO sleeps between signals via CF hibernation API. You pay ~10ms CPU per message, not per connection." },
-            { icon: "🔑", title: "Auth stubbed", body: "QLAVE_DEV_MODE bypasses auth for testing. Swap in your BetterAuth session check before shipping to users." },
+            { icon: "🔑", title: "Signed tickets", body: "Your sign-in mints a short-lived ticket for test-<id>. Test rooms are namespaced, so they never touch real sessions." },
           ].map(c => (
             <div className="info-card" key={c.title}>
               <div className="info-icon">{c.icon}</div>
