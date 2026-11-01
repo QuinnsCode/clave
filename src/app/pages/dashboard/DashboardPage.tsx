@@ -8,14 +8,22 @@ export default async function DashboardPage({ ctx }: { ctx: AppContext }) {
     return new Response(null, { status: 302, headers: { Location: "/user/login" } });
   }
 
-  const data = await loadDashboardData(ctx.user.id, ctx.organization?.id ?? null);
+  // orgId is ctx.organization?.id (the real BetterAuth org UUID) with fallback
+  // to ctx.user.id for users without an org. New sessions store chunks under
+  // orgId in R2. Old sessions store under userId. getSessionRecording tries
+  // both paths so all sessions show up correctly.
+  const tenantId = ctx.organization?.id ?? ctx.user.id;
+
+
+  const data = await loadDashboardData(ctx.user.id, tenantId);
 
   return (
     <DashboardClient
       user={{ id: ctx.user.id, name: ctx.user.name ?? null, email: ctx.user.email ?? null }}
       site={data.site}
-      orgId={ctx.organization?.id ?? null}
+      orgId={tenantId}
       recentSessions={data.recentSessions}
+      artifactsBySession={data.artifactsBySession}
       monthly={data.monthly}
       transcriptionPlugin={data.plugin}
       recordingPlugin={data.recordingPlugin}

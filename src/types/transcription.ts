@@ -1,5 +1,7 @@
 // src/types/transcription.ts
 
+import type { TierKey } from "@/lib/tiers";
+
 export interface TranscribeInput {
     audioBase64: string;
     mimeType: string;
@@ -38,11 +40,12 @@ export interface UsageRecord {
   capMinutes: number;
 }
 
-export type TranscriptionTier = "free" | "starter" | "pro" | "scale";
+export type TranscriptionTier = TierKey;
 
 export interface CaptionMessage {
   type: "caption";
   peerId: string;
+  displayName?: string;
   text: string;
   timestamp: number;
   isFinal: boolean;

@@ -1,25 +1,52 @@
 "use client";
 // src/app/pages/session/SessionWithPlugins.tsx
 
-import { useState, useCallback, useRef } from "react";
+import { useCallback, useMemo, useState, useRef } from "react";
 import SessionClient from "@/app/components/Session/SessionClient";
 import { ChannelSetup } from "@/app/components/Session/ChannelSetup";
 import { useTranscriptionPlugin } from "@/app/hooks/useTranscriptionPlugin";
 import { useMultiChannel } from "@/app/hooks/useMultiChannel";
 import { useRecordingStorage } from "@/app/hooks/useRecordingStorage";
 import RecordingIndicator from "@/app/components/Session/RecordingIndicator";
-import { Mic } from "lucide-react";
+import QollabPortal from "@/app/components/Session/QollabPortal";
+import { Mic, PenLine } from "lucide-react";
 import type { SessionPlugin } from "@/types";
 import type { RecordingTier } from "@/lib/plugins/recording/types";
+import type { TranscriptChunk } from "@/app/api/qlave/getInitialTranscript";
+// NEW: resolved capability snapshot type. SessionPage reads this from the room
+// and passes it down — it tells us which subsystems to actually run
+// (specifically whether to spin up the audio-only recorder for diarization).
+// Inlined to keep client bundle from pulling tiers.ts via the resolver chain.
+// Source of truth is @/lib/qlave/qlaveCapabilities — keep these in sync.
+interface SessionCapabilities {
+  capture: {
+    videoRecorder:  boolean;
+    audioRecorder:  boolean;
+    liveTranscribe: boolean;
+  };
+  postProcess: {
+    diarize: boolean;
+  };
+  vocabulary: {
+    enabled: false;
+    learn:   false;
+  };
+}
 
 interface Props {
-  sessionId:        string;
-  roomCode:         string;
-  user:             { name: string } | null;
-  siteKey:          string | null;
-  orgId:            string;
-  recordingEnabled: boolean;
-  recordingTier:    RecordingTier;
+  sessionId:         string;
+  roomCode:          string;
+  user:              { id?: string; name: string } | null;
+  siteKey:           string | null;
+  orgId:             string;
+  recordingEnabled:  boolean;
+  recordingTier:     RecordingTier;
+  initialTranscript: TranscriptChunk[];
+  // NEW: resolved per-session capability flags from the room snapshot.
+  // Authoritative for what subsystems run — recordingEnabled above is kept
+  // separate because it also gates the RecordingIndicator UI, while
+  // capabilities.capture.audioRecorder gates the parallel audio MediaRecorder.
+  capabilities:      SessionCapabilities;
 }
 
 export default function SessionWithPlugins({
@@ -30,9 +57,13 @@ export default function SessionWithPlugins({
   orgId,
   recordingEnabled,
   recordingTier,
+  initialTranscript,
+  capabilities,
 }: Props) {
+  const peerIdRef          = useRef(crypto.randomUUID());
   const [showChannelSetup, setShowChannelSetup] = useState(false);
-  const wsRef = useRef<WebSocket | null>(null);
+  const [qollabOpen,       setQollabOpen]       = useState(false);
+  const wsRef              = useRef<WebSocket | null>(null);
 
   const multiChannel = useMultiChannel({
     siteKey:      siteKey ?? "",
@@ -41,11 +72,12 @@ export default function SessionWithPlugins({
   });
 
   const transcription = useTranscriptionPlugin({
-    siteKey:         siteKey ?? "",
-    enabled:         !!siteKey,
-    extraChannels:   multiChannel.channels,
-    extraCaptions:   multiChannel.captions,
-    extraTranscript: multiChannel.transcript,
+    siteKey:           siteKey ?? "",
+    enabled:           !!siteKey,
+    initialTranscript,
+    extraChannels:     multiChannel.channels,
+    extraCaptions:     multiChannel.captions,
+    extraTranscript:   multiChannel.transcript,
   });
 
   const recording = useRecordingStorage({
@@ -55,10 +87,12 @@ export default function SessionWithPlugins({
     tier:        recordingTier,
     enabled:     recordingEnabled,
     displayName: user?.name ?? "Guest",
+    // audio-only recorder gate — driven by capabilities snapshot resolved
+    // server-side. When true, runs a second MediaRecorder for diarization.
+    audioEnabled: capabilities.capture.audioRecorder,
   });
 
-  // Attach renderControls here in .tsx where JSX is allowed
-  const recordingPlugin: SessionPlugin = {
+  const recordingPlugin = useMemo<SessionPlugin>(() => ({
     ...recording.plugin,
     renderControls: () => (
       <RecordingIndicator
@@ -66,9 +100,40 @@ export default function SessionWithPlugins({
         tier={recordingTier}
         chunkCount={recording.chunkCount}
         enabled={recordingEnabled}
+        audioEnabled={capabilities.capture.audioRecorder}
+        audioChunkCount={recording.audioChunkCount}
       />
     ),
-  };
+  }), [recording.state, recording.chunkCount, recording.audioChunkCount, recording.plugin, recordingTier, recordingEnabled, capabilities.capture.audioRecorder]);
+
+  // Whiteboard plugin — kept intact, hidden from plugins array for now.
+  // Re-add qollabPlugin to the plugins array below to restore the button.
+  const qollabPlugin = useMemo<SessionPlugin>(() => ({
+    renderControls: () => (
+      <button
+        onClick={() => setQollabOpen(o => !o)}
+        title="Open Qollab whiteboard & docs"
+        style={{
+          display: "flex", alignItems: "center", justifyContent: "center",
+          width: 48, height: 48, borderRadius: "50%",
+          background:  qollabOpen ? "rgba(124,58,237,0.2)"          : "rgba(255,255,255,0.06)",
+          border:      qollabOpen ? "1px solid rgba(124,58,237,0.4)" : "1px solid rgba(255,255,255,0.1)",
+          color:       qollabOpen ? "#a78bfa"                        : "#ece8f8",
+          cursor: "pointer", transition: "all 0.15s",
+        }}
+      >
+        <PenLine size={20} />
+      </button>
+    ),
+  }), [qollabOpen]);
+
+  const plugins = useMemo(() => [
+    transcription,
+    // Include recording plugin when video OR audio recording is active.
+    // audioEnabled can be true even when recordingEnabled is false (diarize-only).
+    ...(recordingEnabled || capabilities.capture.audioRecorder ? [recordingPlugin] : []),
+    // qollabPlugin — hidden for now, restore by adding it back here
+  ], [transcription, recordingEnabled, capabilities.capture.audioRecorder, recordingPlugin]);
 
   const renderLobbyExtra = useCallback(() => {
     if (!siteKey) return null;
@@ -88,11 +153,6 @@ export default function SessionWithPlugins({
     );
   }, [siteKey]);
 
-  const plugins = [
-    transcription,
-    ...(recordingEnabled ? [recordingPlugin] : []),
-  ];
-
   return (
     <>
       {showChannelSetup && (
@@ -108,6 +168,7 @@ export default function SessionWithPlugins({
           onSkip={() => { multiChannel.stopAll(); setShowChannelSetup(false); }}
         />
       )}
+
       <SessionClient
         sessionId={sessionId}
         roomCode={roomCode}
@@ -115,7 +176,19 @@ export default function SessionWithPlugins({
         plugins={plugins}
         renderLobbyExtra={renderLobbyExtra}
         siteKey={siteKey ?? ""}
+        peerId={peerIdRef.current}
+        onSourceSwitch={recording.switchStream}
       />
+
+      {qollabOpen && (
+        <QollabPortal
+          sessionId={sessionId}
+          peerId={peerIdRef.current}
+          userId={user?.id ?? null}
+          orgId={orgId}
+          onClose={() => setQollabOpen(false)}
+        />
+      )}
     </>
   );
 }

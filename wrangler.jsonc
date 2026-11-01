@@ -39,6 +39,10 @@
 				"name": "QOLLAB_WHITEBOARD_DO",
 				"class_name": "QollabWhiteboardDO"
 			},
+			{
+				"name":       "DIARIZE_CONTAINER",
+				"class_name": "DiarizeContainer"
+			}
 		]
 	},
 	"vars": {
@@ -81,6 +85,10 @@
 		{
 			"tag": "v6",
 			"new_sqlite_classes": ["QollabWhiteboardDO"]
+		},
+		{
+			"tag": "v7",
+			"new_sqlite_classes": ["DiarizeContainer"]
 		}
 	],
 	"d1_databases": [
@@ -112,6 +120,10 @@
 			{
 				"binding": "RECORDING_QUEUE",
 				"queue": "qlave-recording-storage-queue"
+			},
+			{
+				"binding": "DIARIZE_QUEUE",
+				"queue": "qlave-diarize-queue"
 			}
 		],
 		"consumers": [
@@ -124,6 +136,13 @@
 				"queue": "qlave-recording-storage-queue",
 				"max_batch_size": 10,
 				"max_batch_timeout": 5
+			},
+			{
+				"queue": "qlave-diarize-queue",
+				"max_batch_size": 10,
+				"max_batch_timeout": 5,
+				"max_retries": 5,
+				"dead_letter_queue": "qlave-diarize-dlq"
 			}
 		]
 	},
@@ -135,6 +154,14 @@
 		{
 			"binding": "RECORDING_BUCKET",
 			"bucket_name": "qlave-recordings"
+		}
+	],
+	"containers": [
+		{
+			"class_name":    "DiarizeContainer",
+			"image":         "./Dockerfile.diarize",
+			"instance_type": "basic",
+			"max_instances": 10
 		}
 	]
 }

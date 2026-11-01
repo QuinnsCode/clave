@@ -1,0 +1,61 @@
+-- RedefineTables
+PRAGMA defer_foreign_keys=ON;
+PRAGMA foreign_keys=OFF;
+CREATE TABLE "new_session_diarization" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "organization_id" TEXT NOT NULL,
+    "site_key" TEXT NOT NULL,
+    "session_id" TEXT NOT NULL,
+    "peer_id" TEXT NOT NULL,
+    "provider" TEXT NOT NULL,
+    "tag" TEXT NOT NULL DEFAULT 'nova3',
+    "provider_opts" TEXT,
+    "status" TEXT NOT NULL DEFAULT 'queued',
+    "attempts" INTEGER NOT NULL DEFAULT 0,
+    "error" TEXT,
+    "triggered_by" TEXT,
+    "audio_key" TEXT,
+    "audio_bytes" INTEGER,
+    "audio_status" TEXT,
+    "audio_error" TEXT,
+    "audio_generated_at" DATETIME,
+    "waveform_key" TEXT,
+    "waveform_bytes" INTEGER,
+    "waveform_pps" TEXT,
+    "waveform_status" TEXT,
+    "waveform_error" TEXT,
+    "waveform_generated_at" DATETIME,
+    "diarization_key" TEXT,
+    "diarization_bytes" INTEGER,
+    "diarization_status" TEXT,
+    "diarization_error" TEXT,
+    "diarization_generated_at" DATETIME,
+    "timeline_key" TEXT,
+    "timeline_bytes" INTEGER,
+    "timeline_status" TEXT,
+    "timeline_error" TEXT,
+    "timeline_generated_at" DATETIME,
+    "result" TEXT,
+    "word_count" INTEGER,
+    "speaker_count" INTEGER,
+    "duration_sec" REAL,
+    "transcript" TEXT,
+    "speaker_labels" TEXT,
+    "word_overrides" TEXT,
+    "created_at" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "started_at" DATETIME,
+    "completed_at" DATETIME,
+    "r2_key" TEXT,
+    CONSTRAINT "session_diarization_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "organization" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+INSERT INTO "new_session_diarization" ("attempts", "completed_at", "created_at", "duration_sec", "error", "id", "organization_id", "peer_id", "provider", "provider_opts", "r2_key", "result", "session_id", "site_key", "speaker_count", "speaker_labels", "started_at", "status", "transcript", "triggered_by", "word_count", "word_overrides") SELECT "attempts", "completed_at", "created_at", "duration_sec", "error", "id", "organization_id", "peer_id", "provider", "provider_opts", "r2_key", "result", "session_id", "site_key", "speaker_count", "speaker_labels", "started_at", "status", "transcript", "triggered_by", "word_count", "word_overrides" FROM "session_diarization";
+DROP TABLE "session_diarization";
+ALTER TABLE "new_session_diarization" RENAME TO "session_diarization";
+CREATE INDEX "session_diarization_organization_id_idx" ON "session_diarization"("organization_id");
+CREATE INDEX "session_diarization_session_id_idx" ON "session_diarization"("session_id");
+CREATE INDEX "session_diarization_session_id_peer_id_idx" ON "session_diarization"("session_id", "peer_id");
+CREATE INDEX "session_diarization_site_key_idx" ON "session_diarization"("site_key");
+CREATE INDEX "session_diarization_organization_id_created_at_idx" ON "session_diarization"("organization_id", "created_at");
+CREATE UNIQUE INDEX "session_diarization_session_id_peer_id_tag_key" ON "session_diarization"("session_id", "peer_id", "tag");
+PRAGMA foreign_keys=ON;
+PRAGMA defer_foreign_keys=OFF;

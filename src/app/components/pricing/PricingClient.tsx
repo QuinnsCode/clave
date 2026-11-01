@@ -3,6 +3,7 @@
 // Only reactive content — tier banner, hero copy, upgrade spotlight, CTA buttons
 
 import { Check, ArrowRight } from "lucide-react";
+import MailTo from "@/app/components/MailTo/MailTo"
 
 export type Tier = "free" | "pro" | "creator" | "founder";
 
@@ -83,7 +84,11 @@ export function UpgradeSpotlight({ currentTier }: { currentTier: Tier }) {
         <div className="spot-eyebrow">{currentTier === "founder" ? "You're a Founder" : "You're on Creator"}</div>
         <div className="spot-title">{currentTier === "founder" ? "You're already on the best plan" : "You're on our highest tier"}</div>
         <div className="spot-desc">Need something custom? Higher limits, team access, API integration, or a white-label setup? We're a small team and we talk to our users directly. Reach out and we'll figure it out.</div>
-        <a href="mailto:theqntbr@gmail.com"><button className="spot-cta to-contact">Contact us — theqntbr@gmail.com <ArrowRight size={14} /></button></a>
+        <MailTo email={`theqntbr@gmail.com`}>
+            <button className="spot-cta to-contact">
+                Contact us — theqntbr@gmail.com <ArrowRight size={14} />
+            </button>
+        </MailTo>
       </div>
     </div>
   );
@@ -135,7 +140,9 @@ export function CtaStrip({ currentTier }: { currentTier: Tier }) {
       <div className="cta-strip-title">Need something custom?</div>
       <div className="cta-strip-sub">Higher limits, team access, API, white-label — reach out directly.</div>
       <div className="cta-btns">
-        <a href="mailto:theqntbr@gmail.com"><button className="btn-purple-lg">Contact us</button></a>
+        <MailTo email="theqntbr@gmail.com">
+            <button className="btn-purple-lg">Contact us</button>
+        </MailTo>
         <a href="/dashboard"><button className="btn-outline-lg">Back to dashboard</button></a>
       </div>
     </>

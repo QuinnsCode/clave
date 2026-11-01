@@ -1,9 +1,31 @@
 "use client";
 
+// CHANGED — pulled media plumbing into mediaControls hooks (useVideoPlayback,
+// useSpacebarPlayPause). Added DriftOverlay (TEMPORARY) for verifying that
+// diarization word timing and timeline speaker-hold markers agree at any
+// given playback moment. Spacebar toggles play/pause when the drawer is
+// open and the user isn't typing.
+//
+// Existing imports preserved. NEW imports marked.
+
 import { useState, useEffect, useRef, useCallback } from "react";
 import { getSessionRecording } from "@/app/serverActions/recording/getSessionRecording";
 import { streamChunksToVideo } from "@/lib/plugins/recording/stitchChunks";
 import type { SessionEntry } from "./SessionList";
+import { getSessionDiarization, type SessionDiarizationView } from "@/app/serverActions/diarization/getSessionDiarization";
+import SpeakerBubbles from "./SpeakerBubbles";
+import { getSessionWaveform, type SessionWaveformView } from "@/app/serverActions/diarization/getSessionWaveform";
+import SpeakerTimelineSection from "./SpeakerTimelineSection";
+import type { WaveformStyleId } from "@/lib/diarization/waveformStyles";
+import { getSessionTimeline, type SessionTimelineView } from "@/app/serverActions/diarization/getSessionTimeline";
+
+// NEW — media control hooks
+import { useVideoPlayback } from "@/app/hooks/mediaControls/useVideoPlayback";
+import { useSpacebarPlayPause } from "@/app/hooks/mediaControls/useSpacebarPlayPause";
+// NEW (TEMPORARY) — drift check infra. Remove these three lines when done.
+import { useDriftCheck } from "@/app/hooks/mediaControls/useDriftCheck";
+import DriftOverlay from "./DriftOverlay";
+import type { SpeakerHoldMarker } from "@/lib/diarization/driftCheck";
 
 interface Props {
   session:  SessionEntry;
@@ -12,6 +34,12 @@ interface Props {
   onClose:  () => void;
   onDelete: (sessionId: string) => void;
 }
+
+// CHANGED (tracks pass) — back to "bars" as the default main waveform.
+// Whispy + shimmer + glow remain available in the registry and can be set
+// per-session/per-user later. "bars" reads honest amplitude — best for the
+// main scrubber paired with the tracks view below.
+const WAVEFORM_STYLE: WaveformStyleId = "bars";
 
 function formatDuration(ms: number | null): string {
   if (!ms) return "—";
@@ -150,7 +178,53 @@ export default function SessionDrawer({ session, orgId, userId, onClose, onDelet
   const [transcript, setTranscript]   = useState<any[]>([]);
   const [loadingTx, setLoadingTx]     = useState(false);
   const [txOpen, setTxOpen]           = useState(false);
-  const videoRef                      = useRef<HTMLVideoElement>(null);
+  const [diarization, setDiarization] = useState<SessionDiarizationView | null>(null);
+  const [loadingDiar, setLoadingDiar] = useState(false);
+  const [waveform, setWaveform]       = useState<SessionWaveformView | null>(null);
+  const [loadingWave, setLoadingWave] = useState(false);
+  const [timeline, setTimeline]       = useState<SessionTimelineView | null>(null);
+  const [loadingTl, setLoadingTl]     = useState(false);
+
+  const videoElRef = useRef<HTMLVideoElement | null>(null);
+
+  // CHANGED — playback state now lives in useVideoPlayback. The hook owns
+  // its own callback ref; we wrap it so we ALSO get an imperative ref for
+  // startStream (.src =, .play()) and handleDownload (.src). currentTime
+  // updates at ~60fps while playing (was ~4fps via onTimeUpdate before).
+  //
+  // Why the wrapping callback ref: the hook needs the element-as-state to
+  // (re)attach listeners when the <video> mounts. The drawer needs sync
+  // access to .src and .play(). Both are satisfied by writing to videoElRef
+  // AND calling the hook's callback ref in one shot.
+  const { videoRef: setVideoEl, currentTime, isPlaying, toggle, seek } = useVideoPlayback();
+
+  const videoRef = useCallback((el: HTMLVideoElement | null) => {
+    videoElRef.current = el;
+    setVideoEl(el);
+  }, [setVideoEl]);
+
+  // NEW — spacebar play/pause when drawer is open. Hook handles input-focus
+  // exemption + native VIDEO element binding so we don't double-fire.
+  useSpacebarPlayPause({
+    enabled: true,
+    onToggle: toggle,
+  });
+
+  // NEW (TEMPORARY) — drift check snapshot. Reads diarization word timing
+  // and timeline speaker-hold markers, reports whether they agree at the
+  // current playback moment. Drives the DriftOverlay HUD.
+  //
+  // Remove this block + the <DriftOverlay /> render below + the imports up
+  // top + the three drift files in src/lib once timing is verified.
+  const allWordsForDrift = diarization?.utterances.flatMap(u => u.words) ?? [];
+  const driftMarkers = (timeline?.markers ?? []).filter(
+    (m): m is SpeakerHoldMarker => (m as any).kind === "speaker-hold"
+  );
+  const driftSnapshot = useDriftCheck({
+    words:     allWordsForDrift,
+    markers:   driftMarkers,
+    currentMs: Math.round(currentTime * 1000),
+  });
 
   // Load recording manifest on mount (just the metadata, not the chunks)
   useEffect(() => {
@@ -161,29 +235,68 @@ export default function SessionDrawer({ session, orgId, userId, onClose, onDelet
       .finally(() => setLoadingRec(false));
   }, [session.sessionId, userId, orgId]);
 
+  // load diarization on mount (parallel to recording fetch)
+  useEffect(() => {
+    setLoadingDiar(true);
+    getSessionDiarization(session.sessionId, userId, orgId)
+      .then(setDiarization)
+      .catch(() => setDiarization(null))
+      .finally(() => setLoadingDiar(false));
+  }, [session.sessionId, userId, orgId]);
+
+  // load waveform once diarization resolves (we need its peerId)
+  useEffect(() => {
+    if (!diarization?.peerId) {
+      setWaveform(null);
+      return;
+    }
+    setLoadingWave(true);
+    getSessionWaveform(session.sessionId, userId, orgId, diarization.peerId)
+      .then(setWaveform)
+      .catch(() => setWaveform(null))
+      .finally(() => setLoadingWave(false));
+  }, [session.sessionId, userId, orgId, diarization?.peerId]);
+
+  // load timeline (multitrack data) in parallel with waveform
+  useEffect(() => {
+    if (!diarization?.peerId) {
+      setTimeline(null);
+      return;
+    }
+    setLoadingTl(true);
+    getSessionTimeline(session.sessionId, userId, orgId, diarization.peerId)
+      .then(setTimeline)
+      .catch(() => setTimeline(null))
+      .finally(() => setLoadingTl(false));
+  }, [session.sessionId, userId, orgId, diarization?.peerId]);
+
   // Only start streaming when user clicks play
   const startStream = useCallback(() => {
-    if (!recording || !videoRef.current || loadStarted) return;
+    if (!recording || !videoElRef.current || loadStarted) return;
     setLoadStarted(true);
 
     if (recording.assembled && recording.assembledUrl) {
-      videoRef.current.src = recording.assembledUrl;
+      videoElRef.current.src = recording.assembledUrl;
       setHasVideo(true);
-      videoRef.current.play().catch(() => {});
       return;
     }
-
+    
     if (recording.chunkUrls.length > 0) {
       setStreaming(true);
       setHasVideo(true);
-      streamChunksToVideo(videoRef.current, recording.chunkUrls, (loaded, total) => {
+      streamChunksToVideo(videoElRef.current, recording.chunkUrls, (loaded, total) => {
         setProgress(Math.round((loaded / total) * 100));
       })
-        .then(() => videoRef.current?.play().catch(() => {}))
         .catch(console.error)
         .finally(() => setStreaming(false));
     }
   }, [recording, loadStarted]);
+
+  // CHANGED — handleSeek delegates to useVideoPlayback's seek().
+  // Same external API for SpeakerTimelineSection, no caller changes needed.
+  const handleSeek = useCallback((sec: number) => {
+    seek(sec);
+  }, [seek]);
 
   // Load transcript only when opened
   useEffect(() => {
@@ -197,9 +310,9 @@ export default function SessionDrawer({ session, orgId, userId, onClose, onDelet
   }, [txOpen, session.sessionId, session.hasTranscript]);
 
   function handleDownload() {
-    if (!videoRef.current?.src) return;
+    if (!videoElRef.current?.src) return;
     const a    = document.createElement("a");
-    a.href     = videoRef.current.src;
+    a.href     = videoElRef.current.src;
     a.download = `session-${session.sessionId.slice(0, 8)}.webm`;
     a.click();
   }
@@ -212,6 +325,7 @@ export default function SessionDrawer({ session, orgId, userId, onClose, onDelet
 
   const hasRecording     = !!recording && (recording.assembled || recording.chunkUrls.length > 0);
   const sessionShortId   = session.sessionId.slice(0, 12);
+  const hasDiarization   = !!diarization && diarization.utterances.length > 0;
 
   return (
     <>
@@ -247,12 +361,14 @@ export default function SessionDrawer({ session, orgId, userId, onClose, onDelet
               {!loadingRec && !hasRecording && <div className="sd-no-recording">No recording for this session</div>}
               {!loadingRec && hasRecording && (
                 <div className="sd-video-wrap">
-                    {/* Always rendered, hidden until playing */}
+                    {/* CHANGED — removed onTimeUpdate; useVideoPlayback handles
+                        timing via play/pause events + RAF loop. The <video>
+                        element is now driven by the hook. */}
                     <video
                         ref={videoRef}
                         controls
                         playsInline
-                        onCanPlay={() => console.log("can play")}
+                        onCanPlay={() => videoElRef.current?.play().catch((e) => console.error("play failed:", e))}
                         onError={(e) => console.error("video error", e.currentTarget.error)}
                         style={{ display: hasVideo ? "block" : "none" }}
                     />
@@ -292,8 +408,36 @@ export default function SessionDrawer({ session, orgId, userId, onClose, onDelet
               )}
             </div>
 
-            {/* Transcript — collapsed by default */}
-            {session.hasTranscript && (
+            {/* Interactive waveform section. Renders nothing if no waveform exists. */}
+            <SpeakerTimelineSection
+              waveform={waveform}
+              timeline={timeline}
+              loading={loadingWave || loadingTl}
+              sessionId={session.sessionId}
+              speakers={diarization?.speakers ?? []}
+              speakerLabels={diarization?.speakerLabels ?? null}
+              currentTime={currentTime}
+              onSeek={handleSeek}
+              style={WAVEFORM_STYLE}
+            />
+
+            {/* Transcript section: prefer the diarized bubble view; fall back to flat */}
+            {/* Bubble view (diarization) */}
+            {hasDiarization && diarization && (
+              <SpeakerBubbles
+                speakers={diarization.speakers}
+                utterances={diarization.utterances}
+                speakerLabels={diarization.speakerLabels}
+                diarizationId={diarization.diarizationId}
+                currentTime={currentTime}
+                overrides={diarization.overrides}
+                organizationId={orgId}
+                userId={userId}
+              />
+            )}
+
+            {/* Flat transcript fallback — collapsed by default, shown only when no diarization */}
+            {!hasDiarization && !loadingDiar && session.hasTranscript && (
               <div>
                 <div
                   className="sd-transcript-toggle"
@@ -339,6 +483,16 @@ export default function SessionDrawer({ session, orgId, userId, onClose, onDelet
 
         </div>
       </div>
+
+      {/* NEW (TEMPORARY) — drift HUD. Mounted outside the panel so it's
+          unaffected by drawer scroll/clip. Remove this whole block + the
+          useDriftCheck call + the import once timing is verified. */}
+      {hasVideo && loadStarted && (
+        <DriftOverlay
+          snapshot={driftSnapshot}
+          labels={diarization?.speakerLabels?.labels ?? null}
+        />
+      )}
     </>
   );
 }

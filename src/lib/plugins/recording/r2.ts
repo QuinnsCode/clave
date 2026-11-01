@@ -25,14 +25,39 @@ export function chunkPrefix(orgId: string, sessionId: string, peerId: string): s
   return `${orgId}/${sessionId}/${peerId}/chunks/`;
 }
 
+// ── Audio-only key helpers ────────────────────────────────────────────────────
+// NEW section. The video path uses /chunks/ above. For diarization we record a
+// parallel audio-only stream and store it under /audio/ so the two never collide.
+// assembledAudioKey is where the diarize container writes the concatenated Opus
+// before sending to nova-3. diarizationKey is where the speaker-labeled JSON
+// result lands. All keys live under the existing {orgId}/{sessionId}/{peerId}/
+// prefix so all per-peer artifacts stay grouped together.
+
+export function audioChunkKey(orgId: string, sessionId: string, peerId: string, chunkIndex: number, ext = "webm"): string {
+  return `${orgId}/${sessionId}/${peerId}/audio/${String(chunkIndex).padStart(6, "0")}.${ext}`;
+}
+export function audioChunkPrefix(orgId: string, sessionId: string, peerId: string): string {
+  return `${orgId}/${sessionId}/${peerId}/audio/`;
+}
+export function assembledAudioKey(orgId: string, sessionId: string, peerId: string): string {
+  return `${orgId}/${sessionId}/${peerId}/audio.webm`;
+}
+export function diarizationKey(orgId: string, sessionId: string, peerId: string): string {
+  return `${orgId}/${sessionId}/${peerId}/diarization.json`;
+}
+
 // ── MIME helpers ──────────────────────────────────────────────────────────────
 
 const EXT_MAP: Record<string, string> = {
-  "video/webm":                 "webm",
-  "video/webm;codecs=vp8,opus": "webm",
-  "video/webm;codecs=vp9,opus": "webm",
-  "video/mp4":                  "mp4",
+    "video/webm":                 "webm",
+    "video/webm;codecs=vp8,opus": "webm",
+    "video/webm;codecs=vp9,opus": "webm",
+    "video/mp4":                  "mp4",
+    "audio/webm":                 "webm",
+    "audio/webm;codecs=opus":     "webm",
+    "audio/mp4":                  "mp4",
 };
+
 export const SUPPORTED_MIME_TYPES = Object.keys(EXT_MAP);
 export function extForMime(mimeType: string): string {
   return EXT_MAP[mimeType] ?? "webm";
@@ -80,6 +105,47 @@ export async function listChunkKeys(
   const accessKeyId     = (env as any).R2_ACCESS_KEY_ID as string;
   const secretAccessKey = (env as any).R2_SECRET_ACCESS_KEY as string;
   const prefix          = chunkPrefix(orgId, sessionId, peerId);
+  const host            = `${accountId}.r2.cloudflarestorage.com`;
+  const keys: string[]  = [];
+  let continuationToken: string | undefined;
+
+  const client = new AwsClient({ accessKeyId, secretAccessKey });
+
+  do {
+    const queryParams = new URLSearchParams({
+      "list-type": "2",
+      "prefix":    prefix,
+      ...(continuationToken ? { "continuation-token": continuationToken } : {}),
+    });
+
+    const url = `https://${host}/${RECORDING_BUCKET}?${queryParams}`;
+    const res  = await client.fetch(url);
+    const text = await res.text();
+
+    const matches = text.matchAll(/<Key>([^<]+)<\/Key>/g);
+    for (const m of matches) keys.push(m[1]);
+
+    continuationToken = text.match(/<NextContinuationToken>([^<]+)<\/NextContinuationToken>/)?.[1];
+  } while (continuationToken);
+
+  return keys.sort();
+}
+
+// ── List audio chunk keys for diarization ─────────────────────────────────────
+// NEW. Parallel to listChunkKeys but for the audio-only stream. The diarize
+// container uses this to know what to concat with ffmpeg before nova-3.
+// Logic is identical to listChunkKeys — just swaps the prefix.
+
+export async function listAudioChunkKeys(
+  env: Env,
+  orgId: string,
+  sessionId: string,
+  peerId: string
+): Promise<string[]> {
+  const accountId       = (env as any).R2_ACCOUNT_ID as string;
+  const accessKeyId     = (env as any).R2_ACCESS_KEY_ID as string;
+  const secretAccessKey = (env as any).R2_SECRET_ACCESS_KEY as string;
+  const prefix          = audioChunkPrefix(orgId, sessionId, peerId);
   const host            = `${accountId}.r2.cloudflarestorage.com`;
   const keys: string[]  = [];
   let continuationToken: string | undefined;

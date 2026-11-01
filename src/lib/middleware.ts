@@ -66,6 +66,7 @@ export const ROUTES: RouteConfig[] = [
 
   // ── Required auth + org ───────────────────────────────────────────────────
   { prefix: "/dashboard",            auth: "required", org: true   },
+  { prefix: "/pods",                 auth: "required", org: true   },
 ];
 
 // ── CSP presets ───────────────────────────────────────────────────────────────

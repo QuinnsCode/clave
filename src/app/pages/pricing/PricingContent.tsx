@@ -12,6 +12,7 @@ import {
   ProCTA,
   CtaStrip,
 } from "@/app/components/pricing/PricingClient";
+import MailTo from "@/app/components/MailTo/MailTo";
 
 const CSS = `
 @import url('https://fonts.googleapis.com/css2?family=Josefin+Sans:wght@300;400;600;700&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500&family=DM+Mono:wght@400;500&display=swap');
@@ -271,11 +272,11 @@ export default function PricingContent({ currentTier, isLoggedIn }: Props) {
                 <div className="plan-feature" key={f.text}><FC type={f.t as any} /><span>{f.text}</span></div>
               ))}
             </div>
-            <a href="mailto:theqntbr@gmail.com" style={{ marginTop: 32 }}>
-              <button className="plan-cta ccontact">
-                <Mail size={13} /> theqntbr@gmail.com
-              </button>
-            </a>
+            <MailTo email="theqntbr@gmail.com">
+                <button className="plan-cta ccontact" style={{ marginTop: 32 }}>
+                    <Mail size={13} /> theqntbr@gmail.com
+                </button>
+            </MailTo>
           </div>
 
         </div>

@@ -7,6 +7,11 @@ import { AppContext } from "@/worker";
 import SessionWithPlugins from "@/app/components/Session/SessionWithPlugins";
 import { resolveRoom } from "@/lib/qlave/roomCode";
 import { resolveRoomPlugins } from "@/lib/qlave/resolveRoomPlugins";
+import { getInitialTranscript } from "@/app/api/qlave/getInitialTranscript";
+// NEW: capabilities live in the room snapshot for new rooms. For legacy rooms
+// without a snapshot we derive a sensible default (no diarization, audio
+// bundled with video). This guarantees nothing breaks for in-flight sessions.
+import { deriveCapabilitiesFromLegacyRoom } from "@/lib/qlave/qlaveCapabilities";
 import { Drum } from "lucide-react";
 
 export default async function SessionPage({
@@ -56,8 +61,22 @@ export default async function SessionPage({
     );
   }
 
-  const { orgId, siteKey, recordingEnabled, recordingTier } =
-    await resolveRoomPlugins(room, ctx.user?.id);
+  const [{ orgId, siteKey, recordingEnabled, recordingTier }, initialTranscript] =
+    await Promise.all([
+      resolveRoomPlugins(room, ctx.user?.id),
+      getInitialTranscript(room.sessionId),
+    ]);
+
+  // NEW: resolve the session capabilities. New rooms have a snapshot from
+  // createRoom (room.plugins.capabilities). Legacy rooms (created before this
+  // change) don't — we rebuild a back-compatible default from the existing
+  // transcription/recording blocks, with diarize forced off (since they never
+  // recorded an audio-only track for it to consume).
+  const capabilities = room.plugins.capabilities
+    ?? deriveCapabilitiesFromLegacyRoom({
+         transcription: room.plugins.transcription,
+         recording:     room.plugins.recording,
+       });
 
   const user = ctx.user
     ? { name: ctx.user.name ?? ctx.user.email ?? "Guest" }
@@ -72,6 +91,11 @@ export default async function SessionPage({
       orgId={orgId}
       recordingEnabled={recordingEnabled}
       recordingTier={recordingTier}
+      initialTranscript={initialTranscript}
+      // NEW: pass the resolved capabilities so the client knows which hooks
+      // to activate (specifically whether to start the audio-only recorder
+      // for diarization).
+      capabilities={capabilities}
     />
   );
 }

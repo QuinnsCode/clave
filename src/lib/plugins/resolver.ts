@@ -6,6 +6,10 @@ import type { OrgPlugin } from "@/db";
 import { TRANSCRIPTION_MODELS, type TranscriptionModelKey } from "@/lib/transcription/models";
 import { TRANSCRIPTION_TIERS } from "@/lib/transcription/usage";
 import type { RecordingTier } from "@/lib/plugins/recording/types";
+// CHANGED: tier definitions live in @/lib/tiers now (the god file).
+// VALID_TIERS / AppTier / resolveAppTier below are re-exported from there
+// so existing imports of those symbols from this file keep working unchanged.
+import { ALL_TIER_KEYS, normalizeTier, type TierKey } from "@/lib/tiers";
 
 export type PluginMode = "sample" | "trial" | "active" | "disabled";
 
@@ -35,6 +39,18 @@ const TIER_MODEL: Record<string, TranscriptionModelKey> = {
 
 const SAMPLE_MAX_SECONDS = 60;
 
+// ── Canonical tier list ────────────────────────────────────────────────────
+
+// CHANGED: VALID_TIERS / AppTier / resolveAppTier moved to @/lib/tiers so
+// there's one source of truth across the app. These re-exports preserve the
+// existing import surface — nothing downstream of this file needs to change.
+// The legacy alias map (basic/starter/enterprise/unlimited) is preserved
+// inside normalizeTier in tiers.ts, plus we added "scale" → "creator".
+export const VALID_TIERS    = ALL_TIER_KEYS;
+export type  AppTier        = TierKey;
+export const resolveAppTier = normalizeTier;
+// ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
 export function resolveTranscriptionPlugin(
   plugin: OrgPlugin | null,
   minutesUsed = 0,
@@ -57,7 +73,7 @@ export function resolveTranscriptionPlugin(
   }
 
   const mode       = resolveMode(plugin);
-  const tier       = plugin.tier ?? "pro";
+  const tier        = resolveAppTier(plugin.tier);
   const tierLabel  = TRANSCRIPTION_TIERS[tier as keyof typeof TRANSCRIPTION_TIERS]?.label ?? tier;
   const modelKey   = (TIER_MODEL[tier] ?? "whisper-large-v3-turbo") as TranscriptionModelKey;
   const capMinutes = TRANSCRIPTION_TIERS[tier as keyof typeof TRANSCRIPTION_TIERS]?.capMinutes ?? 600;
@@ -199,4 +215,57 @@ export async function getRecordingPluginByUserId(
   });
   if (!site?.organizationId) return resolveRecordingPlugin(null);
   return getRecordingPlugin(db, site.organizationId, kv);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NEW section below — nothing above was removed; only the inline tier definitions
+// were replaced with re-exports (see CHANGED comment in that section).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── Diarization ───────────────────────────────────────────────────────────────
+//
+// Diarization is bundled with the transcription tier — there is no separate
+// OrgPlugin row for it today. We derive enabled/mode/tier from the resolved
+// transcription plugin, but expose it as its own ResolvedDiarizationPlugin so:
+//   - Code that needs to ask "can this org diarize" reads one clean shape
+//   - Future divergence (separate tier, separate cap, separate trial) is a
+//     surface-level change here, not a hunt across the codebase
+//   - The room snapshot can carry a `diarization` block parallel to
+//     `transcription` and `recording`
+//
+// Tier coupling rule today: enabled iff transcription is enabled AND mode is
+// not "sample" (i.e. real transcription access, not the 60-second demo).
+
+export interface ResolvedDiarizationPlugin {
+  enabled:   boolean;
+  mode:      PluginMode;
+  tier:      string;
+  tierLabel: string;
+  // No cap of its own yet — diarization runs once per recorded session, and
+  // the recording cap (hoursPerMonth) already gates how many sessions exist
+  // to diarize. If we want a separate cap later, add it here.
+}
+
+export function resolveDiarizationPlugin(
+  transcription: ResolvedTranscriptionPlugin,
+): ResolvedDiarizationPlugin {
+  // Sample mode (no real transcription access) does not get diarization —
+  // the 60-second demo is for the live captions feature, not post-process.
+  const enabled = transcription.enabled && transcription.mode !== "sample";
+
+  return {
+    enabled,
+    mode:      enabled ? transcription.mode : "disabled",
+    tier:      transcription.tier,
+    tierLabel: transcription.tierLabel,
+  };
+}
+
+export async function getDiarizationPluginByUserId(
+  db: any,
+  userId: string,
+  kv?: KVNamespace,
+): Promise<ResolvedDiarizationPlugin> {
+  const transcription = await getTranscriptionPluginByUserId(db, userId, kv);
+  return resolveDiarizationPlugin(transcription);
 }

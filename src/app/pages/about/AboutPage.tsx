@@ -1,5 +1,6 @@
 // src/app/pages/static/about/AboutPage.tsx
 import { Drum } from "lucide-react";
+import MailTo from "@/app/components/MailTo/MailTo";
 
 export default function AboutPage() {
   return (
@@ -88,7 +89,12 @@ export default function AboutPage() {
 
         <Section title="Contact">
           <P>
-            Questions, bugs, feedback, custom needs: <a href="mailto:hey@qlave.dev">hey@qlave.dev</a>
+            Questions, bugs, feedback, custom needs:{" "}
+            <MailTo email="hey@qlave.dev">
+              <span style={{ color: "var(--purple-l)", cursor: "pointer", textDecoration: "underline" }}>
+                hey@qlave.dev
+              </span>
+            </MailTo>
           </P>
         </Section>
 

@@ -1,5 +1,5 @@
-// serverActions/user/setPassword.ts
 "use server"
+// serverActions/user/setPassword.ts
 
 import { auth } from "@/lib/auth"
 import { requestInfo } from "rwsdk/worker"

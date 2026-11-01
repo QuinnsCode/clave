@@ -3,21 +3,33 @@
 // Plugin-aware session client.
 // Knows nothing about transcription, chat, or any feature.
 // Features inject via SessionPlugin interface.
+//
+// Video source:
+//   Users can switch between Camera and Screen via the source picker in the
+//   controls bar. Switching replaces the video track sent to all peers via
+//   replaceTrack, and calls onSourceSwitch(newStream) so recording hooks can
+//   switch their recorder to the new stream without interrupting audio.
+//
+// Controls layout:
+//   Plugin controls (RecordingIndicator etc.) render in a slim strip above
+//   the controls bar so the bar stays uncluttered.
+//   Hang up confirms if you're the last peer in the room.
 
-import { useState, useEffect, useRef, useCallback } from "react";
-import { Mic, MicOff, Video, VideoOff, Monitor, PhoneOff, Copy, Check, Drum } from "lucide-react";
-import type { SessionPlugin, SignalMessage, PeerInfo } from "@/types";
+import { useState, useEffect, useRef, useCallback, memo } from "react";
+import { Mic, MicOff, Video, VideoOff, Monitor, Camera, PhoneOff, Copy, Check, Drum } from "lucide-react";
+import type { SessionPlugin, SignalMessage } from "@/types";
+import { ICE_SERVERS } from "@/lib/webrtc/iceServers";
 
 interface Peer {
-  id: string;
-  name: string;
-  stream: MediaStream | null;
-  pc: RTCPeerConnection;
+  id:         string;
+  name:       string;
+  stream:     MediaStream | null;
+  pc:         RTCPeerConnection;
   audioMuted: boolean;
   videoMuted: boolean;
 }
 
-const ICE_SERVERS = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+type VideoSource = "camera" | "screen";
 
 const CSS = `
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -81,9 +93,17 @@ const CSS = `
   .tiles-overlay { position: absolute; inset: 0; pointer-events: none; z-index: 5; }
   .tiles-overlay > * { pointer-events: all; }
 
+  /* ── Plugin status strip — above controls bar ── */
+  .plugin-strip {
+    display: flex; align-items: center; justify-content: center;
+    gap: 8px; padding: 6px 20px; flex-shrink: 0;
+    border-top: 1px solid rgba(255,255,255,0.04);
+    min-height: 32px;
+  }
+
   .controls {
     display: flex; align-items: center; justify-content: center; gap: 12px;
-    padding: 20px; flex-shrink: 0; border-top: 1px solid rgba(255,255,255,0.06);
+    padding: 16px 20px; flex-shrink: 0; border-top: 1px solid rgba(255,255,255,0.06);
   }
   .ctrl-btn {
     display: flex; align-items: center; justify-content: center;
@@ -96,6 +116,22 @@ const CSS = `
   .ctrl-btn.danger { background: rgba(248,113,113,0.12); border-color: rgba(248,113,113,0.3); color: #f87171; }
   .ctrl-btn.danger:hover { background: rgba(248,113,113,0.2); }
   .ctrl-btn.muted { background: rgba(248,113,113,0.08); border-color: rgba(248,113,113,0.2); color: #f87171; }
+
+  /* Source picker */
+  .source-picker {
+    display: flex; align-items: center; gap: 4px;
+    background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 100px; padding: 4px;
+  }
+  .source-btn {
+    display: flex; align-items: center; justify-content: center;
+    width: 36px; height: 36px; border-radius: 50%;
+    background: transparent; border: none;
+    color: #4a4660; cursor: pointer; transition: all 0.15s;
+  }
+  .source-btn:hover { color: #918caa; }
+  .source-btn.active { background: rgba(124,58,237,0.2); color: #a78bfa; }
+
   .lobby {
     flex: 1; display: flex; flex-direction: column;
     align-items: center; justify-content: center; gap: 24px; padding: 40px;
@@ -127,7 +163,6 @@ const CSS = `
   .tiles[data-count="5"], .tiles[data-count="6"] { grid-template-columns: 1fr 1fr 1fr; max-width: 1400px; width: 100%; margin: 0 auto; }
   @media (max-width: 640px) {
     .session-body { flex-direction: column; }
-    .session-panel { width: 100%; border-left: none; border-top: 1px solid rgba(255,255,255,0.06); max-height: 40vh; }
     .tiles[data-count="2"],.tiles[data-count="3"],.tiles[data-count="4"],.tiles[data-count="5"],.tiles[data-count="6"] { grid-template-columns: 1fr; }
     .tiles[data-count="3"] .tile:last-child { grid-column: auto; max-width: 100%; }
     .lobby-preview { width: 100%; }
@@ -162,41 +197,132 @@ function runMessagePlugins(plugins: SessionPlugin[], msg: SignalMessage): boolea
   return false;
 }
 
+// -----------------------
+
+/** Add tracks from stream to a PC. Skips tracks already represented by a sender. */
+function addTracksToPC(pc: RTCPeerConnection, stream: MediaStream | null): void {
+  if (!pc || !stream) return;
+  const existingKinds = new Set(
+    pc.getSenders().map(s => s.track?.kind).filter(Boolean)
+  );
+  stream.getTracks().forEach(track => {
+    if (!existingKinds.has(track.kind)) {
+      pc.addTrack(track, stream);
+    }
+  });
+}
+
+/** Add stream tracks to every existing peer connection.
+ *  Called when getUserMedia resolves after PCs already exist (late stream on mobile Safari). */
+function addStreamToAllPCs(peers: Map<string, Peer> | null, stream: MediaStream | null): void {
+  if (!peers || !stream) return;
+  peers.forEach(peer => {
+    if (peer?.pc) addTracksToPC(peer.pc, stream);
+  });
+}
+
+// ── VideoTile ─────────────────────────────────────────────────────────────────
+
+const VideoTile = memo(function VideoTile({
+  stream, name, isSelf, audioMuted,
+}: {
+  stream:     MediaStream | null;
+  name:       string;
+  isSelf:     boolean;
+  audioMuted: boolean;
+}) {
+  const ref                     = useRef<HTMLVideoElement>(null);
+  const [needsTap, setNeedsTap] = useState(false);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.srcObject   = stream ?? null;
+    el.muted       = isSelf;
+    el.playsInline = true;
+    if (!stream) return;
+    el.play().catch(err => {
+      if (err.name === "NotAllowedError") setNeedsTap(true);
+    });
+  }, [stream, isSelf]);
+
+  return (
+    <div className={`tile ${isSelf ? "self" : ""}`}>
+      <video ref={ref} autoPlay playsInline muted={isSelf} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+      {!stream && <div className="tile-avatar">{initials(name)}</div>}
+      {needsTap && (
+        <div
+          onClick={() => ref.current?.play().then(() => setNeedsTap(false)).catch(() => {})}
+          style={{
+            position: "absolute", inset: 0, display: "flex", alignItems: "center",
+            justifyContent: "center", flexDirection: "column", gap: 8,
+            background: "rgba(0,0,0,0.4)", cursor: "pointer", backdropFilter: "blur(2px)",
+            fontSize: 13, color: "rgba(255,255,255,0.8)",
+          }}
+        >
+          <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+            <circle cx="16" cy="16" r="15" stroke="white" strokeWidth="1.5" strokeOpacity="0.6"/>
+            <path d="M13 11l10 5-10 5V11z" fill="white" fillOpacity="0.8"/>
+          </svg>
+          Tap to enable audio
+        </div>
+      )}
+      <div className="tile-name">{name}</div>
+      {audioMuted && <div className="tile-muted"><MicOff size={13} color="#f87171" /></div>}
+    </div>
+  );
+});
+
+// ── SessionClient ─────────────────────────────────────────────────────────────
+
 export default function SessionClient({
   sessionId,
   roomCode,
   user,
+  peerId: peerIdProp,
   plugins = [],
   siteKey,
   renderLobbyExtra,
+  onSourceSwitch,
 }: {
-  sessionId: string;
-  roomCode: string;
-  user: { name: string } | null;
-  plugins?: SessionPlugin[];
-  siteKey: string;
+  sessionId:        string;
+  roomCode:         string;
+  user:             { name: string } | null;
+  plugins?:         SessionPlugin[];
+  siteKey:          string;
   renderLobbyExtra?: () => React.ReactNode;
+  peerId?:          string;
+  // Called when the user switches video source so the recording hook can
+  // swap its recorder to the new stream. Audio keeps recording regardless.
+  onSourceSwitch?: (newStream: MediaStream) => void;
 }) {
-  const peerId          = useRef(crypto.randomUUID());
-  const peerName        = user?.name ?? "Guest";
+  const peerId          = useRef(peerIdProp ?? crypto.randomUUID());
   const wsRef           = useRef<WebSocket | null>(null);
   const localStreamRef  = useRef<MediaStream | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
   const peersRef        = useRef<Map<string, Peer>>(new Map());
-  const localVideoRef   = useRef<HTMLVideoElement>(null);
   const lobbyVideoRef   = useRef<HTMLVideoElement>(null);
+  const pluginsRef      = useRef(plugins);
 
-  const [phase, setPhase]             = useState<"lobby" | "session">("lobby");
-  const [peers, setPeers]             = useState<Peer[]>([]);
-  const [audioMuted, setAudioMuted]   = useState(false);
-  const [videoMuted, setVideoMuted]   = useState(false);
-  const [screenSharing, setScreenSharing] = useState(false);
-  const [copied, setCopied]           = useState(false);
+  const [phase,       setPhase]       = useState<"lobby" | "session">("lobby");
+  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  const [peers,       setPeers]       = useState<Peer[]>([]);
+  const [audioMuted,  setAudioMuted]  = useState(false);
+  const [videoMuted,  setVideoMuted]  = useState(false);
+  const [videoSource, setVideoSource] = useState<VideoSource>("camera");
+  const [copied,      setCopied]      = useState(false);
+  const [guestName,   setGuestName]   = useState("");
+
+  const peerName = user?.name ?? (guestName.trim() || "Guest");
+
+  useEffect(() => { pluginsRef.current = plugins; }, [plugins]);
 
   useEffect(() => {
     navigator.mediaDevices.getUserMedia({ video: true, audio: true })
       .then(stream => {
         localStreamRef.current = stream;
+        setLocalStream(stream);
+        addStreamToAllPCs(peersRef.current, stream);
         if (lobbyVideoRef.current) lobbyVideoRef.current.srcObject = stream;
       })
       .catch(console.error);
@@ -205,7 +331,7 @@ export default function SessionClient({
 
   const createPeerConnection = useCallback((remotePeerId: string, remoteName: string): RTCPeerConnection => {
     const pc = new RTCPeerConnection(ICE_SERVERS);
-    localStreamRef.current?.getTracks().forEach(track => pc.addTrack(track, localStreamRef.current!));
+    if (localStreamRef.current) addTracksToPC(pc, localStreamRef.current);
 
     const remoteStream = new MediaStream();
     pc.ontrack = e => {
@@ -214,7 +340,7 @@ export default function SessionClient({
       if (peer) {
         peer.stream = remoteStream;
         setPeers(Array.from(peersRef.current.values()));
-        runPlugins(plugins, "onPeerStreamUpdated", { peerId: remotePeerId, displayName: peer.name, stream: remoteStream });
+        runPlugins(pluginsRef.current, "onPeerStreamUpdated", { peerId: remotePeerId, displayName: peer.name, stream: remoteStream });
       }
     };
 
@@ -228,16 +354,16 @@ export default function SessionClient({
       if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
         peersRef.current.delete(remotePeerId);
         setPeers(Array.from(peersRef.current.values()));
-        runPlugins(plugins, "onPeerLeft", remotePeerId);
+        runPlugins(pluginsRef.current, "onPeerLeft", remotePeerId);
       }
     };
 
     const peer: Peer = { id: remotePeerId, name: remoteName, stream: null, pc, audioMuted: false, videoMuted: false };
     peersRef.current.set(remotePeerId, peer);
     setPeers(Array.from(peersRef.current.values()));
-    runPlugins(plugins, "onPeerJoined", { peerId: remotePeerId, displayName: remoteName, stream: null });
+    runPlugins(pluginsRef.current, "onPeerJoined", { peerId: remotePeerId, displayName: remoteName, stream: null });
     return pc;
-  }, [plugins]);
+  }, []);
 
   const connect = useCallback((stream: MediaStream) => {
     const ws = new WebSocket(getWsUrl(sessionId, peerId.current, siteKey, roomCode));
@@ -245,25 +371,25 @@ export default function SessionClient({
 
     ws.onopen = () => {
       ws.send(JSON.stringify({ type: "join", name: peerName }));
-      runPlugins(plugins, "onJoin", ws, peerId.current, stream);
+      runPlugins(pluginsRef.current, "onJoin", ws, peerId.current, stream);
     };
 
     ws.onmessage = async (e) => {
       const msg: SignalMessage = JSON.parse(e.data);
-      if (runMessagePlugins(plugins, msg)) return;
+      if (runMessagePlugins(pluginsRef.current, msg)) return;
 
       if (msg.type === "joined" && msg.peers) {
         const names = msg.peerNames ?? {};
         for (const pid of msg.peers) {
           if (pid === peerId.current) continue;
-          const pc = createPeerConnection(pid, names[pid] ?? pid.slice(0, 8));
+          const pc    = createPeerConnection(pid, names[pid] ?? pid.slice(0, 8));
           const offer = await pc.createOffer();
           await pc.setLocalDescription(offer);
           ws.send(JSON.stringify({ type: "offer", to: pid, from: peerId.current, sdp: offer }));
         }
       }
       if (msg.type === "peer-joined" && msg.peerId) {
-        if (!peersRef.current.has(msg.peerId)) 
+        if (!peersRef.current.has(msg.peerId))
           createPeerConnection(msg.peerId, msg.name ?? msg.peerId.slice(0, 8));
       }
       if (msg.type === "offer" && msg.from && msg.sdp) {
@@ -286,7 +412,7 @@ export default function SessionClient({
         peersRef.current.get(msg.peerId)?.pc.close();
         peersRef.current.delete(msg.peerId);
         setPeers(Array.from(peersRef.current.values()));
-        runPlugins(plugins, "onPeerLeft", msg.peerId);
+        runPlugins(pluginsRef.current, "onPeerLeft", msg.peerId);
       }
     };
 
@@ -294,18 +420,64 @@ export default function SessionClient({
       peersRef.current.forEach(p => p.pc.close());
       peersRef.current.clear();
       setPeers([]);
-      // Don't call onLeave here — WS close can be temporary (DO hibernation)
-      // onLeave is called explicitly in leave()
     };
-  }, [sessionId, siteKey, createPeerConnection, plugins]);
+  }, [sessionId, siteKey, roomCode, peerName, createPeerConnection]);
 
   const join = useCallback(() => {
     const stream = localStreamRef.current;
     if (!stream) return;
-    if (localVideoRef.current) localVideoRef.current.srcObject = stream;
     setPhase("session");
     connect(stream);
   }, [connect]);
+
+  // ── Video source switching ────────────────────────────────────────────────
+
+  const switchToScreen = useCallback(async () => {
+    try {
+      const screen      = await navigator.mediaDevices.getDisplayMedia({ video: true });
+      screenStreamRef.current = screen;
+      const screenTrack = screen.getVideoTracks()[0];
+
+      // Replace track for all peers — wrapped in case a PC is mid-close
+      peersRef.current.forEach(p => {
+        const sender = p.pc.getSenders().find(s => s.track?.kind === "video");
+        try { if (sender) sender.replaceTrack(screenTrack); } catch { /* peer disconnecting */ }
+      });
+
+      setLocalStream(screen);
+      setVideoSource("screen");
+      onSourceSwitch?.(screen);
+
+      // Revert to camera when user stops screen share via browser UI
+      screenTrack.onended = () => switchToCamera();
+    } catch {
+      // User cancelled the picker — stay on camera
+    }
+  }, [onSourceSwitch]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const switchToCamera = useCallback(() => {
+    const cameraStream = localStreamRef.current;
+    if (!cameraStream) return;
+
+    screenStreamRef.current?.getTracks().forEach(t => t.stop());
+    screenStreamRef.current = null;
+
+    const cameraTrack = cameraStream.getVideoTracks()[0];
+    // Replace track for all peers — wrapped in case a PC is mid-close
+    peersRef.current.forEach(p => {
+      const sender = p.pc.getSenders().find(s => s.track?.kind === "video");
+      try { if (sender && cameraTrack) sender.replaceTrack(cameraTrack); } catch { /* peer disconnecting */ }
+    });
+
+    setLocalStream(cameraStream);
+    setVideoSource("camera");
+    onSourceSwitch?.(cameraStream);
+  }, [onSourceSwitch]);
+
+  const handleSourceToggle = useCallback((source: VideoSource) => {
+    if (source === "screen") switchToScreen();
+    else switchToCamera();
+  }, [switchToScreen, switchToCamera]);
 
   const toggleAudio = () => {
     const muted = !audioMuted;
@@ -319,37 +491,14 @@ export default function SessionClient({
     setVideoMuted(muted);
   };
 
-  const toggleScreen = async () => {
-    if (screenSharing) {
-      screenStreamRef.current?.getTracks().forEach(t => t.stop());
-      screenStreamRef.current = null;
-      const camTrack = localStreamRef.current?.getVideoTracks()[0];
-      if (camTrack) peersRef.current.forEach(p => {
-        const sender = p.pc.getSenders().find(s => s.track?.kind === "video");
-        if (sender) sender.replaceTrack(camTrack);
-      });
-      setScreenSharing(false);
-    } else {
-      try {
-        const screen = await navigator.mediaDevices.getDisplayMedia({ video: true });
-        screenStreamRef.current = screen;
-        const screenTrack = screen.getVideoTracks()[0];
-        peersRef.current.forEach(p => {
-          const sender = p.pc.getSenders().find(s => s.track?.kind === "video");
-          if (sender) sender.replaceTrack(screenTrack);
-        });
-        screenTrack.onended = () => toggleScreen();
-        setScreenSharing(true);
-      } catch { /* cancelled */ }
-    }
-  };
-
   const leave = () => {
+    // Confirm if last peer in room — fat finger protection
+    if (peers.length === 0 && !window.confirm("You're the last one here — end the session?")) return;
     wsRef.current?.send(JSON.stringify({ type: "leave" }));
     wsRef.current?.close();
     localStreamRef.current?.getTracks().forEach(t => t.stop());
     screenStreamRef.current?.getTracks().forEach(t => t.stop());
-    runPlugins(plugins, "onLeave");  // ← explicit call here
+    runPlugins(pluginsRef.current, "onLeave");
     window.location.href = "/dashboard";
   };
 
@@ -361,7 +510,7 @@ export default function SessionClient({
 
   useEffect(() => {
     return () => {
-      runPlugins(plugins, "onLeave");  // ← add this
+      runPlugins(pluginsRef.current, "onLeave");
       wsRef.current?.close();
       localStreamRef.current?.getTracks().forEach(t => t.stop());
       screenStreamRef.current?.getTracks().forEach(t => t.stop());
@@ -369,8 +518,8 @@ export default function SessionClient({
     };
   }, []);
 
-  const pluginControls = plugins.map((p, i) => p.renderControls?.() ?? null).filter(Boolean);
-  const pluginOverlays = plugins.map((p, i) => p.renderOverlay?.() ?? null).filter(Boolean);
+  const pluginControls = plugins.map(p => p.renderControls?.() ?? null).filter(Boolean);
+  const pluginOverlays = plugins.map(p => p.renderOverlay?.() ?? null).filter(Boolean);
 
   if (phase === "lobby") {
     return (
@@ -401,8 +550,25 @@ export default function SessionClient({
                 {videoMuted ? <VideoOff size={18} /> : <Video size={18} />}
               </button>
             </div>
-            <button className="btn-join" onClick={join}>Join room</button>
-            {renderLobbyExtra?.()}
+            {!user && (
+              <input
+                placeholder="Your name"
+                value={guestName}
+                onChange={e => setGuestName(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && guestName.trim() && join()}
+                style={{
+                  padding: "10px 16px", borderRadius: 8, fontSize: 14,
+                  background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)",
+                  color: "#ece8f8", outline: "none", width: 240, textAlign: "center",
+                  fontFamily: "'DM Sans', system-ui, sans-serif",
+                }}
+              />
+            )}
+            <button className="btn-join" onClick={join} disabled={!localStream || (!user && !guestName.trim())}>
+              Join room
+            </button>
+            {/* Multi-channel setup hidden — DO NOT DELETE, kept for future restore */}
+            {/* {renderLobbyExtra?.()} */}
           </div>
         </div>
       </>
@@ -410,7 +576,7 @@ export default function SessionClient({
   }
 
   const allTiles = [
-    { id: peerId.current, name: `${peerName} (you)`, stream: localStreamRef.current, isSelf: true, audioMuted, videoMuted },
+    { id: peerId.current, name: `${peerName} (you)`, stream: localStream, isSelf: true, audioMuted, videoMuted },
     ...peers.map(p => ({ id: p.id, name: p.name, stream: p.stream, isSelf: false, audioMuted: p.audioMuted, videoMuted: p.videoMuted })),
   ];
   const tileCount = Math.min(allTiles.length, 6);
@@ -434,21 +600,25 @@ export default function SessionClient({
           <div className="tiles-container">
             <div className="tiles" data-count={tileCount}>
               {allTiles.map(tile => (
-                <div key={tile.id} className={`tile ${tile.isSelf ? "self" : ""}`}>
-                  {tile.stream
-                    ? <video autoPlay muted={tile.isSelf} playsInline
-                        ref={el => { if (el) { if (tile.isSelf) localVideoRef.current = el; el.srcObject = tile.stream; } }} />
-                    : <div className="tile-avatar">{initials(tile.name)}</div>
-                  }
-                  <div className="tile-name">{tile.name}</div>
-                  {tile.audioMuted && <div className="tile-muted"><MicOff size={13} color="#f87171" /></div>}
-                </div>
+                <VideoTile
+                  key={tile.id}
+                  stream={tile.stream}
+                  name={tile.name}
+                  isSelf={tile.isSelf}
+                  audioMuted={tile.audioMuted}
+                />
               ))}
             </div>
             {pluginOverlays.length > 0 && <div className="tiles-overlay">{pluginOverlays}</div>}
           </div>
-
         </div>
+
+        {/* Plugin status strip — recording indicator etc. above controls bar */}
+        {pluginControls.length > 0 && (
+          <div className="plugin-strip">
+            {pluginControls}
+          </div>
+        )}
 
         <div className="controls">
           <button className={`ctrl-btn ${audioMuted ? "muted" : ""}`} onClick={toggleAudio} title={audioMuted ? "Unmute" : "Mute"}>
@@ -457,10 +627,25 @@ export default function SessionClient({
           <button className={`ctrl-btn ${videoMuted ? "muted" : ""}`} onClick={toggleVideo} title={videoMuted ? "Show video" : "Hide video"}>
             {videoMuted ? <VideoOff size={20} /> : <Video size={20} />}
           </button>
-          <button className={`ctrl-btn ${screenSharing ? "active" : ""}`} onClick={toggleScreen} title={screenSharing ? "Stop sharing" : "Share screen"}>
-            <Monitor size={20} />
-          </button>
-          {pluginControls}
+
+          {/* Source picker — camera or screen */}
+          <div className="source-picker" title="Video source">
+            <button
+              className={`source-btn ${videoSource === "camera" ? "active" : ""}`}
+              onClick={() => handleSourceToggle("camera")}
+              title="Camera"
+            >
+              <Camera size={16} />
+            </button>
+            <button
+              className={`source-btn ${videoSource === "screen" ? "active" : ""}`}
+              onClick={() => handleSourceToggle("screen")}
+              title="Share screen"
+            >
+              <Monitor size={16} />
+            </button>
+          </div>
+
           <button className="ctrl-btn danger" onClick={leave} title="Leave"><PhoneOff size={20} /></button>
         </div>
       </div>

@@ -1,0 +1,9 @@
+{
+    "name": "qlave-diarize-container",
+    "version": "0.1.0",
+    "type": "module",
+    "private": true,
+    "devDependencies": {
+      "@types/bun": "latest"
+    }
+  }

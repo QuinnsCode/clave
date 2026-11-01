@@ -140,6 +140,8 @@ export const createAuth = () => {
       : { enabled: true, domain: ".qlave.dev" }
     },
     trustedOrigins: [
+      "https://qlave.dev",
+      "https://*.qlave.dev",
       "https://qlave.com",
       "https://*.qlave.com",
       "http://localhost:5173",

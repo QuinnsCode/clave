@@ -11,6 +11,13 @@ import type { ResolvedRecordingPlugin, ResolvedTranscriptionPlugin } from "@/lib
 import type { SessionEntry } from "./SessionList";
 import RoomNudge from "./RoomNudge";
 import { createRoomClient } from "@/lib/qlave/createRoomClient";
+import { resolveAppTier } from "@/lib/plugins/resolver";
+import type { SessionArtifactsView } from "@/app/serverActions/diarization/getSessionArtifacts";
+// NEW (cta unify) — modal is now owned by DashboardClient so both
+// RoomNudge (rendered here) and HomeTab "Create room" can open the same flow.
+import CreateRoomModal from "@/app/components/Session/CreateRoomModal";
+import type { RoomConfig } from "@/lib/qlave/roomCode";
+
 
 type Tab = "home" | "usage" | "plugins" | "billing" | "settings" | "profile";
 type Theme = "dark" | "light" | "system";
@@ -31,6 +38,7 @@ interface Props {
   site: { id: string; siteKey: string } | null;
   orgId: string | null;
   recentSessions: SessionEntry[];
+  artifactsBySession?: Record<string, SessionArtifactsView[]>;
   monthly: MonthlyStats;
   transcriptionPlugin?: ResolvedTranscriptionPlugin | null;
   loadError?: string | null;
@@ -40,9 +48,9 @@ interface Props {
 
 // ── Tier helpers ──────────────────────────────────────────────────────────────
 
-function getTier(plugin: ResolvedTranscriptionPlugin | null | undefined): Tier {
+function getTier(plugin: ResolvedTranscriptionPlugin | null | undefined): AppTier {
   if (!plugin || !plugin.enabled) return "free";
-  return (plugin.tier as Tier) ?? "free";
+  return resolveAppTier(plugin.tier);
 }
 
 const TIER_COLOR: Record<Tier, string> = {
@@ -391,8 +399,8 @@ const PLAN_FEATURES: Record<Tier, { label: string; sub: string }[]> = {
 };
 
 function BillingTab({ tier }: { tier: Tier }) {
-  const plan = PLAN_COPY[tier];
-  const features = PLAN_FEATURES[tier];
+  const plan     = PLAN_COPY[tier]     ?? PLAN_COPY["free"];
+  const features = PLAN_FEATURES[tier] ?? PLAN_FEATURES["free"];
 
   return (
     <>
@@ -603,14 +611,21 @@ function SidebarNav({ active, onSelect, theme, onTheme, onClose, tier }: {
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
-export default function DashboardClient({ user, site, orgId, recentSessions, monthly, transcriptionPlugin, loadError, recordingPlugin, maxPeers }: Props) {
+export default function DashboardClient({ user, site, orgId, recentSessions, artifactsBySession, monthly, transcriptionPlugin, loadError, recordingPlugin, maxPeers }: Props) {
   const [tab, setTab] = useState<Tab>("home");
   const [theme, setTheme] = useState<Theme>("system");
   const [menuOpen, setMenuOpen] = useState(false);
 
   const tier = getTier(transcriptionPlugin);
-  const [nudgeGenerating, setNudgeGenerating] = useState(false);
-  const [activeRoomUrl, setActiveRoomUrl]     = useState<string | null>(null);
+  // CHANGED (cta unify) — renamed from nudgeGenerating to generating since
+  // it's now shared across both CTAs (RoomNudge + HomeTab's Create button).
+  const [generating, setGenerating]       = useState(false);
+  const [activeRoomUrl, setActiveRoomUrl] = useState<string | null>(null);
+
+  // NEW (cta unify) — modal open state lifted up from HomeTab so RoomNudge
+  // (rendered at this level) can open the same modal that HomeTab's
+  // "Create room" button opens. One modal, two trigger points.
+  const [showCreateRoom, setShowCreateRoom] = useState(false);
 
   const handleThemeChange = useCallback(async (t: Theme) => {
     setTheme(t);
@@ -645,18 +660,30 @@ export default function DashboardClient({ user, site, orgId, recentSessions, mon
     document.documentElement.setAttribute("data-theme", resolved);
   }, [theme]);
 
-  async function handleNudgeStart() {
-    setNudgeGenerating(true);
+  // CHANGED (cta unify) — both CTAs now open the modal instead of creating
+  // a default-config room directly. RoomNudge passes onStartRoom to this
+  // function, HomeTab gets onCreateRoom as a prop. Both wind up here.
+  const openCreateRoom = useCallback(() => {
+    setShowCreateRoom(true);
+  }, []);
+
+  // NEW (cta unify) — the actual room creation call, triggered when the
+  // user confirms the modal. Was previously inline inside HomeTab's
+  // createRoom callback. Lifted up so the modal can be controlled from
+  // here. Both CTAs hit the same code path now.
+  const handleConfirmCreateRoom = useCallback(async (config: RoomConfig) => {
+    setShowCreateRoom(false);
+    setGenerating(true);
     try {
-      const url = await createRoomClient();
+      const url = await createRoomClient(config);
       if (url) {
         setActiveRoomUrl(url);
         setTab("home");
       }
     } finally {
-      setNudgeGenerating(false);
+      setGenerating(false);
     }
-  }
+  }, []);
 
   const tabContent: Record<Tab, React.ReactNode> = {
     home:     <HomeTab
@@ -664,9 +691,18 @@ export default function DashboardClient({ user, site, orgId, recentSessions, mon
                 site={site}
                 orgId={orgId}
                 recentSessions={recentSessions}
+                artifactsBySession={artifactsBySession ?? {}}
                 monthly={monthly}
                 activeRoomUrl={activeRoomUrl}
                 onRoomCreated={setActiveRoomUrl}
+                // CHANGED (cta unify) — pass the modal opener instead of
+                // letting HomeTab own its own modal. transcription/recording/
+                // maxPeers still passed because HomeTab uses them elsewhere
+                // (room display + future actions) and we may want them in
+                // the future even though the modal itself now reads them
+                // from props passed at the DashboardClient render below.
+                onCreateRoom={openCreateRoom}
+                creating={generating}
                 transcription={transcriptionPlugin ?? null}
                 recording={recordingPlugin ?? null}
                 maxPeers={maxPeers}
@@ -722,10 +758,25 @@ export default function DashboardClient({ user, site, orgId, recentSessions, mon
         </div>
       </div>
       <RoomNudge
-        onStartRoom={handleNudgeStart}
-        generating={nudgeGenerating}
+        // CHANGED (cta unify) — opens the modal instead of calling
+        // createRoomClient directly. Same flow as HomeTab "Create room"
+        // button now.
+        onStartRoom={openCreateRoom}
+        generating={generating}
         roomUrl={activeRoomUrl}
       />
+
+      {/* NEW (cta unify) — single CreateRoomModal at this level, shared
+          by both CTAs. Conditionally rendered so unmount cleans up state. */}
+      {showCreateRoom && (
+        <CreateRoomModal
+          transcription={transcriptionPlugin ?? null}
+          recording={recordingPlugin ?? null}
+          maxPeers={maxPeers}
+          onConfirm={handleConfirmCreateRoom}
+          onClose={() => setShowCreateRoom(false)}
+        />
+      )}
     </>
   );
 }

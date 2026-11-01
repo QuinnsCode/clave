@@ -1,5 +1,6 @@
 // src/app/pages/legal/TermsPage.tsx
 import { Drum } from "lucide-react";
+import MailTo from "@/app/components/MailTo/MailTo";
 
 export default function TermsPage() {
   return (
@@ -103,7 +104,12 @@ export default function TermsPage() {
           </P>
           <P>
             For power usage, higher transcription limits, custom data needs, or volume pricing, contact
-            us directly at <a href="mailto:theqntbr@gmail.com">theqntbr@gmail.com</a>.
+            us directly at{" "}
+            <MailTo email="theqntbr@gmail.com">
+              <span style={{ color: "var(--purple-l)", cursor: "pointer", textDecoration: "underline" }}>
+                theqntbr@gmail.com
+              </span>
+            </MailTo>.
           </P>
         </Section>
 
@@ -195,7 +201,12 @@ export default function TermsPage() {
 
         <Section title="13. Contact">
           <P>
-            Questions? Reach out at <a href="mailto:theqntbr@gmail.com">theqntbr@gmail.com</a>.
+            Questions? Reach out at{" "}
+            <MailTo email="theqntbr@gmail.com">
+              <span style={{ color: "var(--purple-l)", cursor: "pointer", textDecoration: "underline" }}>
+                theqntbr@gmail.com
+              </span>
+            </MailTo>.
           </P>
         </Section>
 

@@ -24,6 +24,8 @@ import NoAccessPage from "@/app/pages/errors/NoAccessPage";
 import LandingPage from "@/app/pages/landing/LandingPage";
 import QlaveTestPage from "@/app/pages/qlave-test/QlaveTestPage";
 import DashboardPage from "@/app/pages/dashboard/DashboardPage";
+import PodsPage from "@/app/pages/pods/PodsPage";
+import PodDetailPage from "@/app/pages/pods/PodDetailPage"
 import SessionPage from "@/app/pages/session/SessionPage";
 import RecapPage from "@/app/pages/session/RecapPage";
 import TranscribeTestPage from "@/app/pages/transcribe/TranscribeTestPage";
@@ -31,12 +33,15 @@ import { LoginPage } from "@/app/pages/user/LoginPage";
 import SignupPage from "@/app/pages/user/SignupPage";
 import AdminUpgradePage from "@/app/pages/admin/AdminUpgradePage";
 import TestPage from "@/app/pages/test/TestPage";
+import QollabPage from "@/app/pages/qollab/QollabPage";
 
 // ── Durable Object exports ────────────────────────────────────────────────────
 export { SessionDurableObject } from "./session/durableObject";
 export { QlaveSessionDO } from "./durableObjects/qlaveSessionDO";
 export { UserSessionDO } from "./durableObjects/userSessionDO";
 export { RecordingCoordinatorDO } from "./durableObjects/recordingCoordinatorDO";
+export { QollabWhiteboardDO } from "./durableObjects/qollabWhiteboardDO";
+export { DiarizeContainer } from "./durableObjects/diarizeContainer";
 
 // ── App context type ──────────────────────────────────────────────────────────
 export type AppContext = {
@@ -159,6 +164,12 @@ const app = defineApp([
     const id = env.QLAVE_SESSION_DO.idFromName(params.code);
     return env.QLAVE_SESSION_DO.get(id).fetch(request);
   }),
+  
+  route("/__qollab/:sessionId", async ({ request, params }) => {
+    const id = env.QOLLAB_WHITEBOARD_DO.idFromName(params.sessionId);
+    return env.QOLLAB_WHITEBOARD_DO.get(id).fetch(request);
+  }),
+
 
   // ── API routes ────────────────────────────────────────────────────────────
 
@@ -189,6 +200,9 @@ const app = defineApp([
     termsRoute,
 
     route("/dashboard", DashboardPage),
+    route("/pods", PodsPage),
+    route("/pods/:slug", PodDetailPage),
+
 
     prefix("/admin", [
       route("/upgrade", AdminUpgradePage),
@@ -198,6 +212,7 @@ const app = defineApp([
     route("/s", SessionPage),
     route("/s/:code", SessionPage),
     route("/s/:code/recap", RecapPage),
+    route("/qollab/:sessionId", QollabPage), 
 
     route("/", LandingPage),
 
@@ -209,8 +224,10 @@ const app = defineApp([
         pathname.startsWith("/api/") ||
         pathname.startsWith("/__") ||
         pathname.startsWith("/dashboard") ||
+        pathname.startsWith("/pods") ||
         pathname.startsWith("/webhooks/") ||
-        pathname.startsWith("/s")
+        pathname.startsWith("/s") ||
+        pathname.startsWith("/qollab")
       ) return;
       return new Response(null, { status: 301, headers: { Location: "/" } });
     }),
@@ -227,40 +244,57 @@ export default {
 
   // ── Queues ────────────────────────────────────────────────────────────────
   async queue(batch: MessageBatch<unknown>, env: Env, _ctx: ExecutionContext) {
-    if (batch.queue === "ALERT_QUEUE") {
-      return handleAlertQueue(batch as MessageBatch<AlertQueueMessage>, env);
-    }
-
-    // ── Recording assembly — dynamic import, only loads when this queue fires
-    if (batch.queue === "qlave-recording-storage-queue") {
-      const { handleRecordingQueue } = await import("@/lib/plugins/recording/queue");
-      return handleRecordingQueue(batch as MessageBatch<any>, env);
-    }
-
-    const summarizeMessages = batch.messages.filter(m => (m.body as any)?.type === "summarize-session");
-    const usageMessages     = batch.messages.filter(m => (m.body as any)?.type !== "summarize-session");
-
-    for (const msg of summarizeMessages) {
-      try {
-        const { handleSummarizeSession } = await import("@/app/workers/session-summary-worker");
-        await handleSummarizeSession(msg.body as SummarizeSessionMessage, env);
-        msg.ack();
-      } catch (e) {
-        console.error("[queue] summarize-session failed:", e);
-        msg.retry();
+    switch (batch.queue) {
+      case "ALERT_QUEUE": {
+        return handleAlertQueue(batch as MessageBatch<AlertQueueMessage>, env);
       }
-    }
-
-    if (usageMessages.length > 0) {
-      const { default: handler } = await import("@/app/workers/transcription-usage-worker");
-      for (const msg of usageMessages) {
-        try {
-          await handler.queue({ messages: [msg], queue: batch.queue } as any);
-          msg.ack();
-        } catch (e) {
-          msg.retry();
+ 
+      case "qlave-recording-storage-queue": {
+        const { handleRecordingQueue } = await import("@/lib/plugins/recording/queue");
+        return handleRecordingQueue(batch as MessageBatch<any>, env);
+      }
+ 
+      case "qlave-diarize-queue": {   // NEW
+        const { handleDiarizeQueue } = await import("@/lib/diarization/queueConsumer");
+        return handleDiarizeQueue(batch as MessageBatch<any>, env);
+      }
+ 
+      case "qlave-transcription-usage": {
+        // Two message types share this queue — split by body.type.
+        // summarize-session goes to session-summary-worker; everything else
+        // is treated as a usage event for transcription-usage-worker.
+        const summarize = batch.messages.filter(m => (m.body as any)?.type === "summarize-session");
+        const usage     = batch.messages.filter(m => (m.body as any)?.type !== "summarize-session");
+ 
+        for (const msg of summarize) {
+          try {
+            const { handleSummarizeSession } = await import("@/app/workers/session-summary-worker");
+            await handleSummarizeSession(msg.body as SummarizeSessionMessage, env);
+            msg.ack();
+          } catch (e) {
+            console.error("[queue] summarize-session failed:", e);
+            msg.retry();
+          }
         }
+ 
+        if (usage.length > 0) {
+          const { default: handler } = await import("@/app/workers/transcription-usage-worker");
+          for (const msg of usage) {
+            try {
+              await handler.queue({ messages: [msg], queue: batch.queue } as any);
+              msg.ack();
+            } catch {
+              msg.retry();
+            }
+          }
+        }
+        return;
       }
+ 
+      default:
+        console.error(`[queue] no handler registered for queue: ${batch.queue}`);
+        batch.retryAll();
+        return;
     }
   },
 } satisfies ExportedHandler<Env>;

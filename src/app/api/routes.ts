@@ -60,6 +60,21 @@ export const apiRoutes = [
     const { default: handler } = await import("@/app/api/qlave/transcribe");
     return handler({ request });
   }),
+  
+  route("/diarization/test", async ({ request, ctx }) => {
+    const { default: handler } = await import("@/lib/diarization/diarize-test");
+    return handler({ request, ctx });
+  }),
+
+  route("/diarization/run", async ({ request, ctx }) => {
+    const { default: handler } = await import("@/lib/diarization/run");
+    return handler({ request, ctx });
+  }),
+
+  route("/diarization/run-v2", async ({ request, ctx }) => {
+    const { default: handler } = await import("@/lib/diarization/run-v2");
+    return handler({ request, ctx });
+  }),
 
   // ── Recording ─────────────────────────────────────────────────────────────
 

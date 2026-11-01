@@ -1,5 +1,7 @@
 // src/lib/tiers.ts
-import { env } from "cloudflare:workers";
+// Single source of truth for tier names and configs.
+// SAFE to import from anywhere (client or server) — no cloudflare:workers,
+// no env access. Stripe price ID resolution lives in app/lib/stripe/config.ts.
 
 const MODEL = "whisper-large-v3-turbo";
 
@@ -30,7 +32,7 @@ export const TIERS = {
   },
 
   pro: {
-    label: "Pro", monthlyPrice: 8, stripe: () => env.STRIPE_PRO_PRICE_ID,
+    label: "Pro", monthlyPrice: 8, stripe: "pro" as const,
     plugins: {
       transcription: { enabled: true, model: MODEL, capMinutes: 600, trialCapMinutes: 0, sampleMaxSeconds: 0 },
       recording:     { enabled: false, resolution: "1080p" as const, maxPeerHoursTotal: 0, maxPeerHoursPerMonth: 0 },
@@ -39,7 +41,7 @@ export const TIERS = {
   },
 
   creator: {
-    label: "Creator", monthlyPrice: 20, stripe: () => env.STRIPE_CREATOR_PRICE_ID,
+    label: "Creator", monthlyPrice: 20, stripe: "creator" as const,
     plugins: {
       transcription: { enabled: true, model: MODEL, capMinutes: 2000, trialCapMinutes: 0, sampleMaxSeconds: 0 },
       recording:     { enabled: true, resolution: "1080p" as const, maxPeerHoursTotal: 200, maxPeerHoursPerMonth: 50 },
@@ -48,12 +50,11 @@ export const TIERS = {
   },
 
   recording: {
-    label: "Recording Storage", monthlyPrice: 3, stripe: () => env.STRIPE_RECORDING_PRICE_ID,
+    label: "Recording Storage", monthlyPrice: 3, stripe: "recording" as const,
     plugins: {
       recording: { enabled: true, resolution: "1080p" as const, maxPeerHoursTotal: 100, maxPeerHoursPerMonth: 30 },
     },
   },
-  
 
   founder: {
     label: "Founder", monthlyPrice: 0, stripe: null,
@@ -68,6 +69,14 @@ export const TIERS = {
 
 export type TierKey = keyof typeof TIERS;
 
+export const ALL_TIER_KEYS = Object.keys(TIERS) as TierKey[];
+
+export const STRIPE_TIER_KEYS = ["pro", "creator", "recording"] as const;
+export type StripeTier = typeof STRIPE_TIER_KEYS[number];
+
+export const ADMIN_GRANTABLE_KEYS = ["free", "pro", "creator"] as const;
+export type AdminGrantableTier = typeof ADMIN_GRANTABLE_KEYS[number];
+
 export function getTier(tier: string): typeof TIERS[TierKey] {
   return TIERS[tier as TierKey] ?? TIERS.free;
 }
@@ -78,6 +87,17 @@ export function getTierPlugins(tier: string) {
 
 export function isUnlimited(cap: number): boolean {
   return cap === 0;
+}
+
+// True iff this tier has a Stripe product associated with it.
+// Doesn't check that the env var is actually set — that's a deployment
+// concern, handled in app/lib/stripe/config.ts.
+export function isPurchasable(tier: TierKey): boolean {
+  return (STRIPE_TIER_KEYS as readonly string[]).includes(tier);
+}
+
+export function getPurchasableTiers(): TierKey[] {
+  return ALL_TIER_KEYS.filter(isPurchasable);
 }
 
 export interface RecordingConfig {
@@ -97,9 +117,16 @@ export function getDefaultRecordingConfig(tier: string): RecordingConfig {
   };
 }
 
-export function getTierFromStripePrice(priceId: string): TierKey {
-  if (priceId === env.STRIPE_PRO_PRICE_ID)       return "pro";
-  if (priceId === env.STRIPE_CREATOR_PRICE_ID)   return "creator";
-  if (priceId === env.STRIPE_RECORDING_PRICE_ID) return "recording";
-  return "free";
+export function normalizeTier(raw: string | null | undefined): TierKey {
+  if (!raw) return "free";
+  if ((ALL_TIER_KEYS as readonly string[]).includes(raw)) return raw as TierKey;
+
+  const aliases: Record<string, TierKey> = {
+    basic:      "free",
+    starter:    "free",
+    scale:      "creator",
+    enterprise: "creator",
+    unlimited:  "founder",
+  };
+  return aliases[raw] ?? "free";
 }

@@ -133,12 +133,13 @@ class ChannelWorker {
 
         // Broadcast caption to session peers via WS
         if (ws?.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({
-            type:      "caption",
-            peerId:    this.id,
-            text,
-            timestamp: Date.now(),
-          }));
+            ws.send(JSON.stringify({
+                type:        "caption",
+                peerId:      this.id,
+                displayName: this.label,
+                text,
+                timestamp:   Date.now(),
+            }));
         }
       } catch { /* network error — skip chunk */ }
     }, INTERVAL_MS);

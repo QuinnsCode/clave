@@ -1,8 +1,8 @@
+"use client";
 // @/app/components/CaptionsUI/CaptionsUI.tsx
 // Renders live caption bubbles per peer + transcript download button.
 // Drop anywhere in your session layout.
 
-"use client";
 
 import type { CaptionMessage } from "@/lib/transcription";
 

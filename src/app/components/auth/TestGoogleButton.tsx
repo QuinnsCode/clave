@@ -1,6 +1,7 @@
+"use client";
 // components/auth/TestGoogleButton.tsx
 // 🧪 TEST COMPONENT - Add to login page temporarily to test V2 auth
-"use client";
+
 
 import { useState } from "react";
 import { authClientV2 } from "@/lib/auth-client-v2";

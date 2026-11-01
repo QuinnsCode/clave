@@ -1,6 +1,5 @@
 // app/lib/stripe/config.ts
 import { env } from 'cloudflare:workers'
-import { getTierFromStripePrice } from '@/lib/tiers'
 import type { TierKey } from '@/lib/tiers'
 
 export const STRIPE_CONFIG = {
@@ -21,5 +20,11 @@ export function getStripePriceId(tier: PaidTier): string {
 }
 
 export function getTierFromPriceId(priceId: string): TierKey {
-  return getTierFromStripePrice(priceId)
+  if (env.STRIPE_PRO_PRICE_ID       && priceId === env.STRIPE_PRO_PRICE_ID)       return "pro";
+  if (env.STRIPE_CREATOR_PRICE_ID   && priceId === env.STRIPE_CREATOR_PRICE_ID)   return "creator";
+  if (env.STRIPE_RECORDING_PRICE_ID && priceId === env.STRIPE_RECORDING_PRICE_ID) return "recording";
+  throw new Error(
+    `Unknown Stripe price ID: ${priceId} — not configured in this deployment. ` +
+    `Check STRIPE_PRO_PRICE_ID, STRIPE_CREATOR_PRICE_ID, STRIPE_RECORDING_PRICE_ID env vars.`
+  );
 }

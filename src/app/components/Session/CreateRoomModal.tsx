@@ -158,6 +158,11 @@ export default function CreateRoomModal({ transcription, recording, maxPeers, on
   const hasTranscription = transcription?.enabled ?? false;
   const hasRecording     = recording?.enabled ?? false;
   const can1080          = recording?.resolution === "1080p";
+  // NEW: diarization is bundled with transcription tier — only available when
+  // transcription is enabled AND not sample-mode (matches resolveDiarizationPlugin
+  // in @/lib/plugins/resolver). Also requires recording, since we need stored
+  // audio to diarize after the session ends.
+  const hasDiarization   = hasTranscription && hasRecording && transcription?.mode !== "sample";
   const tierMaxPeers = maxPeers;
 
   const [config, setConfig] = useState<RoomConfig>({
@@ -167,11 +172,28 @@ export default function CreateRoomModal({ transcription, recording, maxPeers, on
     postSessionTranscribe: false,
     recording:             hasRecording,
     recordingResolution:   (recording?.resolution as "720p" | "1080p") ?? "720p",
+    // NEW: default off. Existing rooms behave identically — diarize stays
+    // false unless the user explicitly toggles it.
+    diarize:               false,
   });
   const [loading, setLoading] = useState(false);
 
   const set = <K extends keyof RoomConfig>(key: K, value: RoomConfig[K]) =>
     setConfig(prev => ({ ...prev, [key]: value }));
+
+  // NEW: diarization implies recording (because we need stored audio) and
+  // transcription (because diarization is bundled with that tier). Toggling
+  // diarize ON force-enables both. Toggling either OFF kills diarize.
+  // Implemented as a separate setter so we can express the dependency in
+  // one place instead of scattering it across multiple `set` calls.
+  const toggleDiarize = (v: boolean) => {
+    setConfig(prev => ({
+      ...prev,
+      diarize:       v,
+      recording:     v ? true : prev.recording,
+      transcription: v ? true : prev.transcription,
+    }));
+  };
 
   const handleConfirm = async () => {
     setLoading(true);
@@ -182,6 +204,10 @@ export default function CreateRoomModal({ transcription, recording, maxPeers, on
   // Dependency enforcement
   const storeTranscriptAvailable = config.transcription && hasRecording;
   const postTranscribeAvailable  = config.transcription && config.recording && hasRecording;
+  // NEW: diarization is only togglable when the tier supports it. The actual
+  // gate is hasDiarization above — this exists for symmetry with the other
+  // *Available variables already used by the JSX below.
+  const diarizeAvailable         = hasDiarization;
 
   return (
     <>
@@ -207,7 +233,9 @@ export default function CreateRoomModal({ transcription, recording, maxPeers, on
               {hasTranscription
                 ? <Toggle checked={config.transcription} onChange={v => {
                     set("transcription", v);
-                    if (!v) { set("storeTranscript", false); set("postSessionTranscribe", false); }
+                    // CHANGED: turning transcription off also kills diarize
+                    // (diarize requires transcription tier access).
+                    if (!v) { set("storeTranscript", false); set("postSessionTranscribe", false); set("diarize", false); }
                   }} />
                 : <span className="lock-badge">upgrade</span>
               }
@@ -240,7 +268,9 @@ export default function CreateRoomModal({ transcription, recording, maxPeers, on
               {hasRecording
                 ? <Toggle checked={config.recording} onChange={v => {
                     set("recording", v);
-                    if (!v) set("postSessionTranscribe", false);
+                    // CHANGED: turning recording off also kills diarize
+                    // (diarize needs stored audio to work).
+                    if (!v) { set("postSessionTranscribe", false); set("diarize", false); }
                   }} />
                 : <span className="lock-badge">upgrade</span>
               }
@@ -256,6 +286,30 @@ export default function CreateRoomModal({ transcription, recording, maxPeers, on
               </div>
               {hasRecording && hasTranscription
                 ? <Toggle checked={config.postSessionTranscribe} onChange={v => set("postSessionTranscribe", v)} disabled={!postTranscribeAvailable} />
+                : <span className="lock-badge">upgrade</span>
+              }
+            </div>
+
+            {/* ── Speaker diarization ── NEW row.
+                Auto-couples recording + transcription via toggleDiarize when
+                turned on. Disabled when tier doesn't support it (sample mode
+                or transcription/recording plugins not enabled). Subtitle copy
+                explains the auto-enable behavior to the user. */}
+            <div className="setting-row">
+              <div className="setting-label">
+                <div className="setting-title">Speaker diarization</div>
+                <div className={`setting-sub ${!diarizeAvailable ? "warn" : ""}`}>
+                  {!hasTranscription
+                    ? "Requires transcription plugin"
+                    : transcription?.mode === "sample"
+                      ? "Requires paid transcription tier"
+                      : !hasRecording
+                        ? "Requires recording plugin"
+                        : "Label speakers in post-session transcript — auto-enables recording"}
+                </div>
+              </div>
+              {hasDiarization
+                ? <Toggle checked={config.diarize ?? false} onChange={toggleDiarize} />
                 : <span className="lock-badge">upgrade</span>
               }
             </div>

@@ -1,0 +1,45 @@
+# Dockerfile.diarize — at qlave repo root.
+# Cloudflare Containers auto-builds and pushes to their registry on `wrangler deploy`.
+# Bun for the HTTP server, ffmpeg for -c copy concat of WebM/Opus chunks.
+# audiowaveform for waveform.dat generation (apt-installable via BBC's pre-built .deb).
+
+FROM oven/bun:1.1-debian
+
+# Install runtime deps:
+#   - ffmpeg          (existing)
+#   - ca-certificates (existing — needed for curl HTTPS to GitHub)
+#   - curl            (existing — used both for HEALTHCHECK and to fetch the .deb)
+# Then download BBC's pre-built audiowaveform .deb for the current arch and install.
+# `apt-get install /path/to/x.deb` auto-resolves the runtime libs the .deb depends
+# on (libmad0, libsndfile1, libid3tag0, libgd3, libboost-filesystem1.74.0, etc.)
+# from the existing Bullseye repos.
+#
+# Pinned to audiowaveform 1.10.2 (latest with binary releases as of 2025).
+# Source: https://github.com/bbc/audiowaveform/releases/tag/1.10.2
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ffmpeg \
+      ca-certificates \
+      curl \
+    && ARCH=$(dpkg --print-architecture) \
+    && curl -fsSL -o /tmp/aw.deb \
+       "https://github.com/bbc/audiowaveform/releases/download/1.10.2/audiowaveform_1.10.2-1-11_${ARCH}.deb" \
+    && apt-get install -y --no-install-recommends /tmp/aw.deb \
+    && rm -f /tmp/aw.deb \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy package.json first so bun install layer caches
+COPY container/diarize/package.json ./
+RUN bun install --production
+
+# Then copy server code
+COPY container/diarize/server.ts ./
+
+ENV PORT=8080
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD curl -fsS http://localhost:${PORT}/health || exit 1
+
+CMD ["bun", "server.ts"]

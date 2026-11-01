@@ -5,6 +5,7 @@ import { useState, useRef, useCallback } from "react";
 import { useVAD } from "./useVAD";
 import type { CaptionMessage, TranscribeSegment } from "@/types/transcription";
 import { arrayBufferToBase64 } from "@/lib/utils/encoding";
+import type { TranscriptChunk } from "@/app/api/qlave/getInitialTranscript";
 
 interface Caption {
   peerId: string;
@@ -44,13 +45,14 @@ function wordsToText(words: TimedWord[]): string {
 }
 
 interface UseTranscribeOptions {
-  siteKey: string;
-  getPeerId:      () => string;
-  getDisplayName?: () => string; // falls back to peerId if not provided
-  getSessionWs: () => WebSocket | null;
-  getStream?: () => MediaStream | null; // optional — reuse existing stream
-  enabled?: boolean;
-  model?: string;
+  siteKey:           string;
+  getPeerId:         () => string;
+  getDisplayName?:   () => string;
+  getSessionWs:      () => WebSocket | null;
+  getStream?:        () => MediaStream | null;
+  enabled?:          boolean;
+  model?:            string;
+  initialTranscript?: TranscriptChunk[];
 }
 
 export function useTranscribe({
@@ -61,21 +63,27 @@ export function useTranscribe({
   getStream,
   enabled = true,
   model,
+  initialTranscript = [],
 }: UseTranscribeOptions) {
-  const [captions,    setCaptions]    = useState<Record<string, Caption>>({});
-  const [liveText,    setLiveText]    = useState("");
-  const [transcript,  setTranscript]  = useState<{ peerId: string; text: string; timestamp: number }[]>([]);
-  const [capReached,  setCapReached]  = useState(false);
+  const [captions,   setCaptions]   = useState<Record<string, Caption>>({});
+  const [liveText,   setLiveText]   = useState("");
+  const [transcript, setTranscript] = useState<TranscriptChunk[]>(initialTranscript);
+  const [capReached, setCapReached] = useState(false);
 
   const timedWordsRef   = useRef<TimedWord[]>([]);
-  const previousTextRef = useRef<string>("");
-  const isActiveRef     = useRef(false);
-  const streamRef       = useRef<MediaStream | null>(null);
+  const previousTextRef = useRef<string>(
+    // Seed context from last chunk of initial transcript if available
+    initialTranscript.length > 0
+      ? initialTranscript[initialTranscript.length - 1].text.split(" ").slice(-10).join(" ")
+      : ""
+  );
+  const isActiveRef  = useRef(false);
+  const streamRef    = useRef<MediaStream | null>(null);
 
   const handleIncomingCaption = useCallback((msg: CaptionMessage) => {
     setCaptions(prev => ({ ...prev, [msg.peerId]: { peerId: msg.peerId, text: msg.text, timestamp: msg.timestamp } }));
     if (msg.isFinal) {
-      setTranscript(prev => [...prev, { peerId: msg.peerId, text: msg.text, timestamp: msg.timestamp }]);
+      setTranscript(prev => [...prev, { peerId: msg.displayName ?? msg.peerId, text: msg.text, timestamp: msg.timestamp }]);
       setTimeout(() => {
         setCaptions(prev => {
           if (prev[msg.peerId]?.timestamp !== msg.timestamp) return prev;
@@ -87,8 +95,11 @@ export function useTranscribe({
   }, []);
 
   const sendChunk = useCallback(async (blob: Blob, mimeType: string, chunkStartTime: number) => {
-    const ws     = getSessionWs();
-    const peerId = getPeerId();
+    const ws          = getSessionWs();
+    const peerId      = getPeerId();
+    const peerId_     = peerId || "me";
+    const displayName_ = getDisplayName?.() || peerId_;
+
     if (!enabled || capReached) return;
 
     const base64 = arrayBufferToBase64(await blob.arrayBuffer());
@@ -141,17 +152,13 @@ export function useTranscribe({
 
     setLiveText(wordsToText(timedWordsRef.current));
 
-    // Append chunk to running transcript — capped at 1000 entries
-    // TODO: raise/lower cap or paginate when building transcript history UI
+    const timestamp = Date.now();
     const MAX_TRANSCRIPT_ENTRIES = 1000;
     setTranscript(prev => {
-      const next = [...prev, { peerId: displayName_, text, timestamp: Date.now() }];
+      const next = [...prev, { peerId: displayName_, text, timestamp }];
       return next.length > MAX_TRANSCRIPT_ENTRIES ? next.slice(-MAX_TRANSCRIPT_ENTRIES) : next;
     });
 
-    const timestamp = Date.now();
-    const peerId_      = peerId || "me";
-    const displayName_  = getDisplayName?.() || peerId_ ;
     setCaptions(prev => ({ ...prev, [peerId_]: { peerId: peerId_, text, timestamp } }));
     setTimeout(() => {
       setCaptions(prev => {
@@ -171,27 +178,21 @@ export function useTranscribe({
       };
       ws.send(JSON.stringify(captionMsg));
     }
-  }, [enabled, capReached, getSessionWs, getPeerId, siteKey, model]);
+  }, [enabled, capReached, getSessionWs, getPeerId, getDisplayName, siteKey, model]);
 
-  // Stable ref to sendChunk — updated every render so the VAD interval
-  // always calls the latest closure without needing to restart the interval.
-  // Avoids stale closure bug where capReached/enabled changes stop chunks firing.
   const sendChunkRef = useRef(sendChunk);
-  sendChunkRef.current = sendChunk; // sync assignment — no useEffect needed
+  sendChunkRef.current = sendChunk;
 
-  // Stable wrapper — never recreated, so useVAD's useEffect cleanup never fires.
-  // The arrow function inside always delegates to the latest sendChunk via ref.
   const stableOnChunk = useCallback(
     (blob: Blob, mimeType: string, chunkStartTime: number) =>
       sendChunkRef.current(blob, mimeType, chunkStartTime),
-    [] // empty deps — intentional, ref handles freshness
+    []
   );
 
   const { start: startVAD, stop: stopVAD } = useVAD({
     onChunk:    stableOnChunk,
     intervalMs: 2_500,
     overlapMs:  800,
-    // stream resolved lazily at start() time via ref
     get stream() { return streamRef.current ?? undefined; },
   });
 
@@ -206,8 +207,7 @@ export function useTranscribe({
   const stop = useCallback(() => {
     isActiveRef.current = false;
     stopVAD();
-    // transcript accumulates live — no need to dump on stop
-  }, [stopVAD, getPeerId]);
+  }, [stopVAD]);
 
   const downloadTranscript = useCallback((format: "txt" | "srt" = "txt") => {
     if (transcript.length === 0) return;
@@ -217,11 +217,10 @@ export function useTranscribe({
     });
 
     const fmtSrtTime = (ms: number) => {
-      // ms here is a wall-clock timestamp — convert to offset from first entry
       const offset = ms - transcript[0].timestamp;
-      const h  = String(Math.floor(offset / 3_600_000)).padStart(2, "0");
-      const m  = String(Math.floor((offset % 3_600_000) / 60_000)).padStart(2, "0");
-      const s  = String(Math.floor((offset % 60_000) / 1_000)).padStart(2, "0");
+      const h   = String(Math.floor(offset / 3_600_000)).padStart(2, "0");
+      const m   = String(Math.floor((offset % 3_600_000) / 60_000)).padStart(2, "0");
+      const s   = String(Math.floor((offset % 60_000) / 1_000)).padStart(2, "0");
       const ms_ = String(offset % 1_000).padStart(3, "0");
       return `${h}:${m}:${s},${ms_}`;
     };
@@ -229,16 +228,14 @@ export function useTranscribe({
     let content = "";
 
     if (format === "txt") {
-      // Script style: [HH:MM:SS] Speaker: text
       content = transcript
         .map(({ peerId, text, timestamp }) =>
           `[${fmtTime(timestamp)}] ${peerId}: ${text}`)
         .join("\n");
     } else {
-      // SRT: each chunk entry is a subtitle block
       transcript.forEach(({ text, timestamp }, i) => {
         const start = fmtSrtTime(timestamp);
-        const end   = fmtSrtTime(timestamp + 2_500); // approx chunk duration
+        const end   = fmtSrtTime(timestamp + 2_500);
         content += `${i + 1}\n${start} --> ${end}\n${text}\n\n`;
       });
     }

@@ -5,9 +5,15 @@
 //
 // Linked to QlaveSessionDO only by sessionId string.
 // Instantiated lazily on first chunk-done — no cost if recording not used.
+//
+// NEW: when chunk-done arrives with kind="audio" we track it as audioChunkCount
+// on the peer record alongside the existing chunkCount. Same peer record,
+// different counter — the diarize container reads audioChunkCount to know what
+// to concat. Video chunks (default) behave identically to before.
 
 import { putJson } from "@/lib/plugins/recording/r2";
 import type { RecordingCoordinatorState, RecordingTier } from "@/lib/plugins/recording/types";
+import { enqueueDiarization } from "@/lib/diarization/enqueue";
 
 const AUTOSAVE_INTERVAL_MS = 3 * 60 * 1000; // 3min, same as transcript autosave
 
@@ -74,14 +80,19 @@ export class RecordingCoordinatorDO {
     await this.ensureLoaded();
     if (!this.coordinator) return Response.json({ ok: false, error: "Not initialized" }, { status: 400 });
 
+    // CHANGED: added optional `kind` field to body type. Default "video"
+    // preserves all prior behavior for clients that don't send it.
     const body = await request.json() as {
       peerId: string;
       displayName: string;
       chunkIndex: number;
       r2Key: string;
+      kind?: "video" | "audio";
     };
 
     const { peerId, displayName, chunkIndex } = body;
+    // NEW: default kind=video so legacy calls hit the same code path as before.
+    const kind = body.kind ?? "video";
 
     if (!this.coordinator.peers[peerId]) {
       this.coordinator.peers[peerId] = {
@@ -93,7 +104,15 @@ export class RecordingCoordinatorDO {
     }
 
     const peer = this.coordinator.peers[peerId];
-    peer.chunkCount = Math.max(peer.chunkCount, chunkIndex + 1);
+    // CHANGED: bump the right counter based on chunk kind. The peer record
+    // shape gains an optional audioChunkCount field (added at the types layer
+    // — non-breaking because optional). Video continues to use chunkCount
+    // exactly as before, so all existing assembly logic stays valid.
+    if (kind === "audio") {
+      (peer as any).audioChunkCount = Math.max((peer as any).audioChunkCount ?? 0, chunkIndex + 1);
+    } else {
+      peer.chunkCount = Math.max(peer.chunkCount, chunkIndex + 1);
+    }
     peer.lastChunkAt = Date.now();
 
     // Persist state — strongly consistent, survives hibernation
@@ -152,13 +171,22 @@ export class RecordingCoordinatorDO {
   }
 
   // ── Assembly trigger ──────────────────────────────────────────────────────
+  //
+  // Called on session end. Fans out:
+  //   1. Video assembly via RECORDING_QUEUE  (existing)
+  //   2. Per-peer diarization via DIARIZE_QUEUE for peers with audio  (NEW)
+  //
+  // Both queue sends are best-effort with their own try/catch — one failing
+  // shouldn't block the other.
+  //
 
   private async triggerAssembly(): Promise<void> {
     if (!this.coordinator) return;
     const { sessionId, orgId, siteKey } = this.coordinator;
-
+ 
     await this.syncPeerListToR2();
-
+ 
+    // ── Video assembly (existing) ────────────────────────────────────────
     try {
       const queue = (this.env as any).RECORDING_QUEUE as Queue;
       await queue.send({
@@ -170,6 +198,34 @@ export class RecordingCoordinatorDO {
       console.log(`[RecordingCoordinatorDO] queued assembly for session ${sessionId}`);
     } catch (e) {
       console.error("[RecordingCoordinatorDO] failed to queue assembly:", e);
+    }
+ 
+    // ── NEW: per-peer diarization fan-out ────────────────────────────────
+    // Source of truth for "this peer has audio worth diarizing" is the
+    // audioChunkCount field we track in handleChunkDone. Filter to >0 to
+    // skip peers with no audio (video-only recordings, or peers who never
+    // unmuted).
+    const audioPeerIds = Object.entries(this.coordinator.peers)
+      .filter(([_, p]) => ((p as any).audioChunkCount ?? 0) > 0)
+      .map(([peerId]) => peerId);
+ 
+    if (audioPeerIds.length === 0) {
+      console.log(`[RecordingCoordinatorDO] no audio peers in session ${sessionId} — skipping diarization`);
+      return;
+    }
+ 
+    try {
+      const { enqueued, failed } = await enqueueDiarization(this.env as any, {
+        organizationId: orgId,
+        siteKey,
+        sessionId,
+        peerIds:        audioPeerIds,
+        // diarizationOpts: omitted for now — provider defaults apply.
+        // Wire per-room config from OrgPlugin here when UI lands.
+      });
+      console.log(`[RecordingCoordinatorDO] diarization fan-out for session ${sessionId}: ${enqueued} enqueued, ${failed} failed`);
+    } catch (e) {
+      console.error("[RecordingCoordinatorDO] diarization fan-out crashed:", e);
     }
   }
 

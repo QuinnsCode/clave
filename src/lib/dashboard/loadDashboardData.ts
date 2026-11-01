@@ -7,6 +7,12 @@ import { getTierPlugins } from "@/lib/tiers";
 import { env } from "cloudflare:workers";
 import type { ResolvedTranscriptionPlugin, ResolvedRecordingPlugin } from "@/lib/plugins/resolver";
 import type { SessionEntry } from "@/app/components/DashboardClient/SessionList";
+// NEW — artifact awareness for badges in session list rows.
+import {
+  getSessionsArtifacts,
+  toPlain,
+  type SessionArtifactsView,
+} from "@/app/serverActions/diarization/getSessionArtifacts";
 
 export interface DashboardData {
   site:              { id: string; siteKey: string } | null;
@@ -14,6 +20,9 @@ export interface DashboardData {
   recordingPlugin:   ResolvedRecordingPlugin | null;
   maxPeers:          number;
   recentSessions:    SessionEntry[];
+  // NEW — per-sessionId artifact state. Empty record if nothing fetched.
+  // Plain object (not Map) so it serializes cleanly through the RSC boundary.
+  artifactsBySession: Record<string, SessionArtifactsView[]>;
   monthly: {
     sessionCount:    number;
     totalMessages:   number;
@@ -21,20 +30,22 @@ export interface DashboardData {
     peakPeers:       number;
   };
   errors: {
-    plugins:  boolean;
-    sessions: boolean;
+    plugins:   boolean;
+    sessions:  boolean;
+    artifacts: boolean;   // NEW — fetch can fail without blocking the page
   };
 }
 
 export async function loadDashboardData(userId: string, organizationId: string | null): Promise<DashboardData> {
   const result: DashboardData = {
-    site:            null,
-    plugin:          null,
-    recordingPlugin: null,
-    maxPeers:        4,
-    recentSessions:  [],
-    monthly:         { sessionCount: 0, totalMessages: 0, totalDurationMs: 0, peakPeers: 0 },
-    errors:          { plugins: false, sessions: false },
+    site:               null,
+    plugin:             null,
+    recordingPlugin:    null,
+    maxPeers:           4,
+    recentSessions:     [],
+    artifactsBySession: {},   // NEW
+    monthly:            { sessionCount: 0, totalMessages: 0, totalDurationMs: 0, peakPeers: 0 },
+    errors:             { plugins: false, sessions: false, artifacts: false },
   };
 
   // ── Plugins + tier ────────────────────────────────────────────────────────
@@ -76,9 +87,14 @@ export async function loadDashboardData(userId: string, organizationId: string |
       ]);
 
       const sessionIds = rawSessions.map(s => s.sessionId);
-      const [transcripts, summaries] = await Promise.all([
+
+      // CHANGED — added artifact bulk fetch alongside the existing transcript/
+      // summary lookups. All three run in parallel against D1; one extra query
+      // for the whole page (not per-row).
+      const [transcripts, summaries, artifactsMap] = await Promise.all([
         db.sessionTranscript.findMany({ where: { sessionId: { in: sessionIds } }, select: { sessionId: true } }),
         db.sessionSummary.findMany({   where: { sessionId: { in: sessionIds } }, select: { sessionId: true } }),
+        getSessionsArtifacts(sessionIds),   // NEW
       ]);
 
       const transcriptSet = new Set(transcripts.map(t => t.sessionId));
@@ -90,6 +106,11 @@ export async function loadDashboardData(userId: string, organizationId: string |
         hasSummary:    summarySet.has(s.sessionId),
         roomCode:      null as string | null,
       }));
+
+      // NEW — flatten Map → plain object for RSC boundary. Sessions with no
+      // diarization rows are absent from the map; the client treats those as
+      // "all artifacts missing" (renders outlined badges).
+      result.artifactsBySession = toPlain(artifactsMap);
 
       result.monthly = {
         sessionCount:    monthlyStats._count.id,

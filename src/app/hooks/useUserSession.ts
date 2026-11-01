@@ -1,5 +1,5 @@
-// @/app/hooks/useUserSession.ts
 "use client";
+// @/app/hooks/useUserSession.ts
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 

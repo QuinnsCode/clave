@@ -129,6 +129,8 @@ model Organization {
   sites    Site[]
   plugins  OrgPlugin[]
   transcriptionUsage TranscriptionUsage[]
+  diarizations       SessionDiarization[]
+  pods               Pod[]                // NEW (R1 pods pass)
 
   @@map("organization")
 }
@@ -299,11 +301,24 @@ model QlaveSessionLog {
   peakPeers    Int       @default(0) @map("peak_peers")
   messageCount Int       @default(0) @map("message_count")
   durationMs   Int?      @map("duration_ms")
+
+  peerMinutes      Int @default(0)  // sum of all peer durations in minutes
+  transcriptChunks Int @default(0)  // total caption chunks received
+  silencePct       Int @default(0)  // % of session with no transcription (0-100)
+
   createdAt    DateTime  @default(now()) @map("created_at")
+
+  // NEW (R1 pods pass) — pod this session belongs to.
+  // Nullable for backward compat: existing rows have null until they're touched
+  // (self-healing). New sessions get a pod-of-1 auto-created in pipeline Phase 0
+  // if no podId was specified in the diarization request.
+  podId String? @map("pod_id")
+  pod   Pod?    @relation(fields: [podId], references: [id])
 
   @@index([siteKey])
   @@index([startedAt])
   @@index([sessionId])
+  @@index([podId])   // NEW (R1 pods pass)
   @@map("qlave_session_log")
 }
 
@@ -370,7 +385,6 @@ model TranscriptionUsage {
   @@index([sessionId])
   @@map("transcription_usage")
 }
-// Add these two models to the bottom of your schema.prisma
 
 model SessionTranscript {
   id        String   @id @default(uuid())
@@ -411,4 +425,168 @@ model RecordingManifest {
   @@index([sessionId])
   @@index([siteKey])
   @@map("recording_manifest")
+}
+
+model SessionDiarization {
+  id             String   @id @default(uuid())
+ 
+  // ── Identity ──────────────────────────────────────────────────────────────
+  organizationId String       @map("organization_id")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  siteKey        String       @map("site_key")
+  sessionId      String       @map("session_id")
+  peerId         String       @map("peer_id")
+ 
+  // ── Provider identity ─────────────────────────────────────────────────────
+  // `provider` is the full registry name resolved by getDiarizationProvider()
+  // — e.g. "workers-ai-nova3", "grok", "deepgram-direct". Internal.
+  // `tag` is the short display/path suffix — e.g. "nova3", "grok", "nova3+grok".
+  // Defaults derived from provider (strip "workers-ai-" prefix, lowercase).
+  // Multiple rows per (session, peer) allowed for A/B testing; the
+  // (session, peer, tag) tuple is unique.
+  provider       String
+  tag            String       @default("nova3")   // NEW
+  providerOpts   String?      @map("provider_opts")  // JSON string
+ 
+  // ── Overall pipeline status ───────────────────────────────────────────────
+  // Reflects the most recent runPipeline() call. Per-step status fields below
+  // give more detail; this is the top-level summary for list views.
+  status         String       @default("queued")  // "queued" | "running" | "done" | "failed"
+  attempts       Int          @default(0)
+  error          String?
+  triggeredBy    String?      @map("triggered_by")  // userId | "queue:auto" | "manual:curl" | "regen:user"
+ 
+  // ── Audio artifact (shared across providers) ──────────────────────────────
+  audioKey         String?   @map("audio_key")
+  audioBytes       Int?      @map("audio_bytes")
+  audioStatus      String?   @map("audio_status")        // "done" | "failed" | "skipped" | null
+  audioError       String?   @map("audio_error")
+  audioGeneratedAt DateTime? @map("audio_generated_at")
+ 
+  // ── Waveform artifact (shared across providers) ───────────────────────────
+  waveformKey         String?   @map("waveform_key")
+  waveformBytes       Int?      @map("waveform_bytes")
+  waveformPps         String?   @map("waveform_pps")     // "1", "0.2", etc — pixels-per-second
+  waveformStatus      String?   @map("waveform_status")
+  waveformError       String?   @map("waveform_error")
+  waveformGeneratedAt DateTime? @map("waveform_generated_at")
+ 
+  // ── Diarization artifact (provider-specific, tagged in R2 path) ───────────
+  diarizationKey         String?   @map("diarization_key")
+  diarizationBytes       Int?      @map("diarization_bytes")
+  diarizationStatus      String?   @map("diarization_status")
+  diarizationError       String?   @map("diarization_error")
+  diarizationGeneratedAt DateTime? @map("diarization_generated_at")
+ 
+  // ── Timeline artifact (provider-specific, derived from diarization) ──────
+  timelineKey         String?   @map("timeline_key")
+  timelineBytes       Int?      @map("timeline_bytes")
+  timelineStatus      String?   @map("timeline_status")
+  timelineError       String?   @map("timeline_error")
+  timelineGeneratedAt DateTime? @map("timeline_generated_at")
+
+  // ── Cleanup artifact (R2 audit of what cleanup did) ──────────────────────
+  // NEW (cleanup pass)
+  // The user-visible result of cleanup lives in `wordOverrides` below.
+  // These fields track the audit JSON saved to R2 + the step's status,
+  // following the same pattern as the other artifacts above.
+  cleanupKey         String?   @map("cleanup_key")
+  cleanupBytes       Int?      @map("cleanup_bytes")
+  cleanupStatus      String?   @map("cleanup_status")
+  cleanupError       String?   @map("cleanup_error")
+  cleanupGeneratedAt DateTime? @map("cleanup_generated_at")
+ 
+  // ── Result payload (queryable copy of diarization.json) ───────────────────
+  // Slim copy of diarization for fast list views + transcript search without
+  // hitting R2. Raw provider response NOT included — that's in R2 only.
+  result         String?     // JSON: { words, speakers, transcript, durationSec, provider }
+  wordCount      Int?         @map("word_count")
+  speakerCount   Int?         @map("speaker_count")
+  durationSec    Float?       @map("duration_sec")
+  transcript     String?     // plain text — for LIKE-based keyword search
+ 
+  // ── Speaker labels + "me" pointer ─────────────────────────────────────────
+  // JSON: { labels?: { "speaker_0": "Ryan" }, me?: "speaker_0" }
+  speakerLabels  String?      @map("speaker_labels")
+ 
+  // ── Per-word edits + locks (R1 pods pass) ─────────────────────────────────
+  // JSON: { edits: [{wordIndex, original, text, at}], locks: [wordIndex...] }
+  wordOverrides  String?      @map("word_overrides")
+ 
+  // ── Timestamps ────────────────────────────────────────────────────────────
+  createdAt      DateTime     @default(now())  @map("created_at")
+  startedAt      DateTime?    @map("started_at")
+  completedAt    DateTime?    @map("completed_at")
+ 
+  // ── LEGACY ────────────────────────────────────────────────────────────────
+  // Old single-artifact pointer. Was the only R2 key tracked before the
+  // multi-artifact / tagged refactor. Existing code writes here; new code
+  // writes diarizationKey. Backfill script copies r2Key → diarizationKey for
+  // existing rows. Drop this field in a future migration once all reads
+  // point to diarizationKey.
+  r2Key                  String?      @map("r2_key")
+ 
+  @@unique([sessionId, peerId, tag])      // CHANGED — one row per (session, peer, tag)
+  @@index([organizationId])
+  @@index([sessionId])
+  @@index([sessionId, peerId])
+  @@index([siteKey])
+  @@index([organizationId, createdAt])
+  @@map("session_diarization")
+}
+
+// ── Pods (R1 pods pass) ──────────────────────────────────────────────────────
+// A Pod is a *context bubble* for a group of related sessions. It owns
+// vocabulary (Anchors) that helps the AI hear the right words across all
+// sessions inside it. Default = pod of 1 (each session gets its own pod).
+// User can later combine sessions under a shared pod.
+//
+// Org owns pods. Sessions reference pods via QlaveSessionLog.podId.
+// Anchors are pod-scoped vocabulary — created/edited via PodAnchor rows.
+
+model Pod {
+  id             String       @id @default(uuid())
+  organizationId String       @map("organization_id")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  // Display name (e.g. "Brave Crimson Pod"). Auto-generated from
+  // unique-names-generator if not provided. User can rename anytime.
+  name           String
+
+  // URL-friendly variant of the name. Auto-derived from name on create.
+  // Unique within the org so users can route /pods/{slug}.
+  slug           String
+
+  createdAt      DateTime     @default(now()) @map("created_at")
+  updatedAt      DateTime     @updatedAt      @map("updated_at")
+
+  sessions       QlaveSessionLog[]
+  anchors        PodAnchor[]
+
+  @@unique([organizationId, slug])
+  @@index([organizationId])
+  @@map("pod")
+}
+
+// An Anchor is a canonical word/phrase the user has taught the pod.
+// At display time: tokens matching canonical (or being edited TO canonical)
+// are reinforced as the correct spelling.
+// At diarization time (R2 — deferred): canonical strings are passed to the
+// provider as a vocabulary boost (nova-3 keyterms / Whisper prompt).
+//
+// v1: just canonical + audit timestamp. v2+ may add pronunciation hint,
+// audio sample refs, alias variants, etc — all additive.
+
+model PodAnchor {
+  id        String   @id @default(uuid())
+  podId     String   @map("pod_id")
+  pod       Pod      @relation(fields: [podId], references: [id], onDelete: Cascade)
+
+  canonical String   // e.g. "Kelly", "K'Ynian", "GraphQL"
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([podId, canonical])
+  @@index([podId])
+  @@map("pod_anchor")
 }

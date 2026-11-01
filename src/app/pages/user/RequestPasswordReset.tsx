@@ -1,5 +1,5 @@
-// @/app/pages/user/RequestPasswordReset.tsx
 "use client";
+// @/app/pages/user/RequestPasswordReset.tsx
 
 import { useState } from "react";
 import { authClient } from "@/lib/auth-client";

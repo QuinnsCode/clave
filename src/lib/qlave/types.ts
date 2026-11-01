@@ -1,3 +1,4 @@
+// src/lib/qlave/types.ts
 export type Status =
   | "idle"
   | "acquiring"

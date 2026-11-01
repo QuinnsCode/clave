@@ -2,6 +2,10 @@
 // POST /api/recording/chunk-done
 // Client calls this after a successful R2 upload.
 // Forwards to RecordingCoordinatorDO — fire and forget from client perspective.
+//
+// NEW: accepts optional `kind` field ("video" | "audio", default "video").
+// Audio-only chunks (for diarization) are tracked under audioChunkCount on the
+// same peer record. Video continues to use the existing chunkCount.
 
 import type { ChunkDoneRequest } from "@/lib/plugins/recording/types";
 import { env } from "cloudflare:workers";
@@ -11,7 +15,10 @@ export default async function handler({ request }: { request: Request }): Promis
     return Response.json({ ok: false, error: "Method not allowed" }, { status: 405 });
   }
 
-  let body: ChunkDoneRequest & { sessionId: string; orgId: string };
+  // CHANGED: widened body type to include optional `kind`. Existing clients
+  // that don't send it default to "video" inside the handler, identical to
+  // the old behavior.
+  let body: ChunkDoneRequest & { sessionId: string; orgId: string; kind?: "video" | "audio" };
   try {
     body = await request.json();
   } catch {
@@ -19,6 +26,8 @@ export default async function handler({ request }: { request: Request }): Promis
   }
 
   const { sessionId, orgId, peerId, displayName, chunkIndex, r2Key } = body;
+  // NEW: default to "video" so callers that don't send kind behave identically.
+  const kind = body.kind ?? "video";
 
   if (!sessionId || !orgId || !peerId || chunkIndex === undefined) {
     return Response.json({ ok: false, error: "Missing required fields" }, { status: 400 });
@@ -33,7 +42,9 @@ export default async function handler({ request }: { request: Request }): Promis
     stub.fetch(doUrl.toString(), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ peerId, displayName, chunkIndex, r2Key }),
+      // CHANGED: pass `kind` through to the DO so it tracks audio chunks
+      // separately from video chunks on the same peer record.
+      body: JSON.stringify({ peerId, displayName, chunkIndex, r2Key, kind }),
     }).catch((e: unknown) => {
       console.error("[chunk-done] DO write failed:", e);
     });

@@ -14,6 +14,9 @@ importers:
       '@aws-sdk/s3-request-presigner':
         specifier: ^3.1012.0
         version: 3.1012.0
+      '@cloudflare/containers':
+        specifier: ^0.3.6
+        version: 0.3.6
       '@prisma/adapter-d1':
         specifier: ~6.8.2
         version: 6.8.2
@@ -50,6 +53,9 @@ importers:
       clsx:
         specifier: ^2.1.1
         version: 2.1.1
+      kysely:
+        specifier: ^0.28.13
+        version: 0.28.13
       lucide-react:
         specifier: ^0.532.0
         version: 0.532.0(react@19.2.3)
@@ -457,6 +463,9 @@ packages:
 
   '@better-fetch/fetch@1.1.18':
     resolution: {integrity: sha512-rEFOE1MYIsBmoMJtQbl32PGHHXuG2hDxvEd7rUHE0vCBoFQVSDqaVs9hkZEtHCxRoY+CljXKFCOuJ8uxqw1LcA==}
+
+  '@cloudflare/containers@0.3.6':
+    resolution: {integrity: sha512-8RrbK/Et165gjvXccui3pgkUuySVWysTC6bJRXfgqmbCA2vAmh8pm7cAKDh2nZFR/GSjW4BgxeKpffCTD8SJEg==}
 
   '@cloudflare/kv-asset-handler@0.4.1':
     resolution: {integrity: sha512-Nu8ahitGFFJztxUml9oD/DLb7Z28C8cd8F46IVQ7y5Btz575pvMY8AqZsXkX7Gds29eCKdMgIHjIvzskHgPSFg==}
@@ -2849,12 +2858,8 @@ packages:
     peerDependencies:
       kysely: '*'
 
-  kysely@0.28.8:
-    resolution: {integrity: sha512-QUOgl5ZrS9IRuhq5FvOKFSsD/3+IA6MLE81/bOOTRA/YQpKDza2sFdN5g6JCB9BOpqMJDGefLCQ9F12hRS13TA==}
-    engines: {node: '>=20.0.0'}
-
-  kysely@0.28.9:
-    resolution: {integrity: sha512-3BeXMoiOhpOwu62CiVpO6lxfq4eS6KMYfQdMsN/2kUCRNuF2YiEr7u0HLHaQU+O4Xu8YXE3bHVkwaQ85i72EuA==}
+  kysely@0.28.13:
+    resolution: {integrity: sha512-jCkYDvlfzOyHaVsrvR4vnNZxG30oNv2jbbFBjTQAUG8n0h07HW0sZJHk4KAQIRyu9ay+Rg+L8qGa3lwt8Gve9w==}
     engines: {node: '>=20.0.0'}
 
   lightningcss-android-arm64@1.30.2:
@@ -4637,26 +4642,28 @@ snapshots:
       '@babel/helper-string-parser': 7.27.1
       '@babel/helper-validator-identifier': 7.28.5
 
-  '@better-auth/core@1.4.5(@better-auth/utils@0.3.0)(@better-fetch/fetch@1.1.18)(better-call@1.1.4(zod@4.1.13))(jose@6.1.3)(kysely@0.28.8)(nanostores@1.1.0)':
+  '@better-auth/core@1.4.5(@better-auth/utils@0.3.0)(@better-fetch/fetch@1.1.18)(better-call@1.1.4(zod@4.1.13))(jose@6.1.3)(kysely@0.28.13)(nanostores@1.1.0)':
     dependencies:
       '@better-auth/utils': 0.3.0
       '@better-fetch/fetch': 1.1.18
       '@standard-schema/spec': 1.0.0
       better-call: 1.1.4(zod@4.1.13)
       jose: 6.1.3
-      kysely: 0.28.8
+      kysely: 0.28.13
       nanostores: 1.1.0
       zod: 4.1.13
 
-  '@better-auth/telemetry@1.4.5(@better-auth/core@1.4.5(@better-auth/utils@0.3.0)(@better-fetch/fetch@1.1.18)(better-call@1.1.4(zod@4.1.13))(jose@6.1.3)(kysely@0.28.9)(nanostores@1.1.0))':
+  '@better-auth/telemetry@1.4.5(@better-auth/core@1.4.5(@better-auth/utils@0.3.0)(@better-fetch/fetch@1.1.18)(better-call@1.1.4(zod@4.1.13))(jose@6.1.3)(kysely@0.28.13)(nanostores@1.1.0))':
     dependencies:
-      '@better-auth/core': 1.4.5(@better-auth/utils@0.3.0)(@better-fetch/fetch@1.1.18)(better-call@1.1.4(zod@4.1.13))(jose@6.1.3)(kysely@0.28.8)(nanostores@1.1.0)
+      '@better-auth/core': 1.4.5(@better-auth/utils@0.3.0)(@better-fetch/fetch@1.1.18)(better-call@1.1.4(zod@4.1.13))(jose@6.1.3)(kysely@0.28.13)(nanostores@1.1.0)
       '@better-auth/utils': 0.3.0
       '@better-fetch/fetch': 1.1.18
 
   '@better-auth/utils@0.3.0': {}
 
   '@better-fetch/fetch@1.1.18': {}
+
+  '@cloudflare/containers@0.3.6': {}
 
   '@cloudflare/kv-asset-handler@0.4.1':
     dependencies:
@@ -6302,8 +6309,8 @@ snapshots:
 
   better-auth@1.4.5(react-dom@19.2.3(react@19.2.3))(react@19.2.3):
     dependencies:
-      '@better-auth/core': 1.4.5(@better-auth/utils@0.3.0)(@better-fetch/fetch@1.1.18)(better-call@1.1.4(zod@4.1.13))(jose@6.1.3)(kysely@0.28.8)(nanostores@1.1.0)
-      '@better-auth/telemetry': 1.4.5(@better-auth/core@1.4.5(@better-auth/utils@0.3.0)(@better-fetch/fetch@1.1.18)(better-call@1.1.4(zod@4.1.13))(jose@6.1.3)(kysely@0.28.9)(nanostores@1.1.0))
+      '@better-auth/core': 1.4.5(@better-auth/utils@0.3.0)(@better-fetch/fetch@1.1.18)(better-call@1.1.4(zod@4.1.13))(jose@6.1.3)(kysely@0.28.13)(nanostores@1.1.0)
+      '@better-auth/telemetry': 1.4.5(@better-auth/core@1.4.5(@better-auth/utils@0.3.0)(@better-fetch/fetch@1.1.18)(better-call@1.1.4(zod@4.1.13))(jose@6.1.3)(kysely@0.28.13)(nanostores@1.1.0))
       '@better-auth/utils': 0.3.0
       '@better-fetch/fetch': 1.1.18
       '@noble/ciphers': 2.0.1
@@ -6311,7 +6318,7 @@ snapshots:
       better-call: 1.1.4(zod@4.1.13)
       defu: 6.1.4
       jose: 6.1.3
-      kysely: 0.28.8
+      kysely: 0.28.13
       ms: 4.0.0-nightly.202508271359
       nanostores: 1.1.0
       zod: 4.1.13
@@ -7061,13 +7068,11 @@ snapshots:
 
   ky@1.7.5: {}
 
-  kysely-do@0.0.1-rc.1(kysely@0.28.9):
+  kysely-do@0.0.1-rc.1(kysely@0.28.13):
     dependencies:
-      kysely: 0.28.9
+      kysely: 0.28.13
 
-  kysely@0.28.8: {}
-
-  kysely@0.28.9: {}
+  kysely@0.28.13: {}
 
   lightningcss-android-arm64@1.30.2:
     optional: true
@@ -7884,8 +7889,8 @@ snapshots:
       glob: 11.1.0
       ignore: 7.0.5
       jsonc-parser: 3.3.1
-      kysely: 0.28.9
-      kysely-do: 0.0.1-rc.1(kysely@0.28.9)
+      kysely: 0.28.13
+      kysely-do: 0.0.1-rc.1(kysely@0.28.13)
       lodash: 4.17.21
       magic-string: 0.30.21
       picocolors: 1.1.1

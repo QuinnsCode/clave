@@ -7,28 +7,29 @@ import { useTranscribe } from "@/app/hooks/useTranscribe";
 import { SessionMixer, getChannelColor } from "@/app/components/Session/SessionMixer";
 import type { SessionPlugin, SignalMessage, PeerInfo } from "@/types";
 import type { CaptionMessage } from "@/lib/transcription";
+import type { TranscriptChunk } from "@/app/api/qlave/getInitialTranscript";
 
 interface TranscriptionPluginOptions {
-  siteKey:          string;
-  enabled?:         boolean;
-  extraChannels?:   { id: string; label: string; stream: MediaStream | null; color: string }[];
-  extraCaptions?:   Record<string, string>;
-  extraTranscript?: { channelId: string; label: string; text: string; timestamp: number }[];
+  siteKey:           string;
+  enabled?:          boolean;
+  initialTranscript?: TranscriptChunk[];
+  extraChannels?:    { id: string; label: string; stream: MediaStream | null; color: string }[];
+  extraCaptions?:    Record<string, string>;
+  extraTranscript?:  { channelId: string; label: string; text: string; timestamp: number }[];
 }
 
 export function useTranscriptionPlugin({
   siteKey,
   enabled = true,
+  initialTranscript = [],
   extraChannels   = [],
   extraCaptions   = {},
   extraTranscript = [],
 }: TranscriptionPluginOptions): SessionPlugin {
-  // Both false on server — no hydration mismatch
   const [showMixer,      setShowMixer]      = useState(false);
   const [showTranscript, setShowTranscript] = useState(false);
   const [mounted,        setMounted]        = useState(false);
-
-  const [peers, setPeers]               = useState<PeerInfo[]>([]);
+  const [peers,          setPeers]          = useState<PeerInfo[]>([]);
 
   const wsRef     = useRef<WebSocket | null>(null);
   const peerIdRef = useRef<string>("");
@@ -46,10 +47,11 @@ export function useTranscriptionPlugin({
     downloadTranscript,
   } = useTranscribe({
     siteKey,
-    getPeerId:      () => peerIdRef.current,
-    getDisplayName: () => peers.find(p => p.peerId === peerIdRef.current)?.displayName ?? peerIdRef.current,
-    getSessionWs:   () => wsRef.current,
+    getPeerId:        () => peerIdRef.current,
+    getDisplayName:   () => peers.find(p => p.peerId === peerIdRef.current)?.displayName ?? peerIdRef.current,
+    getSessionWs:     () => wsRef.current,
     enabled,
+    initialTranscript,
   });
 
   const getChannels = useCallback(() => {
@@ -72,7 +74,7 @@ export function useTranscriptionPlugin({
     wsRef.current     = ws;
     peerIdRef.current = peerId;
     setPeers([{ peerId, displayName: "You", stream }]);
-    start(stream ?? undefined); // pass existing stream — avoids double getUserMedia
+    start(stream ?? undefined);
   }, [start]);
 
   const onLeave: SessionPlugin["onLeave"] = useCallback(() => {
@@ -99,8 +101,6 @@ export function useTranscriptionPlugin({
     setPeers(prev => prev.map(p => p.peerId === peer.peerId ? peer : p));
   }, []);
 
-  // ── Control buttons ───────────────────────────────────────────────────────
-
   const renderControls = useCallback(() => {
     if (!mounted) return null;
     return (
@@ -123,8 +123,6 @@ export function useTranscriptionPlugin({
     );
   }, [mounted, showMixer, showTranscript]);
 
-  // ── Panel ─────────────────────────────────────────────────────────────────
-
   const renderOverlay = useCallback(() => {
     if (!mounted) return null;
     if (!showMixer && !showTranscript) return null;
@@ -145,7 +143,6 @@ export function useTranscriptionPlugin({
         capReached={capReached}
       />
     );
-  // renderOverlay dep array
   }, [mounted, showMixer, showTranscript, getChannels, liveText, transcript, captions, extraTranscript, extraCaptions, downloadTranscript, capReached]);
 
   return {
