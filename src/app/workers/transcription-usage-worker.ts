@@ -18,32 +18,22 @@ export interface UsageMessage {
   recordedAt:   string;
 }
 
-export default {
-  async queue(batch: MessageBatch<UsageMessage>): Promise<void> {
-    await setupDb(env);
-
-    // Batch insert — all messages in one transaction
-    const rows = batch.messages.map(m => m.body);
-
-    try {
-      await db.transcriptionUsage.createMany({
-        data: rows.map(r => ({
-          organizationId: r.orgId,
-          userId:         r.userId,
-          sessionId:      r.sessionId,
-          siteKey:        r.siteKey,
-          model:          r.model,
-          audioSeconds:   r.audioSeconds,
-          neuronsUsed:    r.neuronsUsed,
-          costUsd:        r.costUsd,
-          mode:           r.mode,
-          recordedAt:     new Date(r.recordedAt),
-        })),
-      });
-      batch.ackAll();
-    } catch (e) {
-      console.error("TranscriptionUsage batch insert failed:", e);
-      batch.retryAll();
-    }
-  },
-};
+/** Insert usage rows. Throws on failure; the caller acks or retries its own messages. */
+export async function writeUsageRows(rows: UsageMessage[]): Promise<void> {
+  if (rows.length === 0) return;
+  await setupDb(env);
+  await db.transcriptionUsage.createMany({
+    data: rows.map(r => ({
+      organizationId: r.orgId,
+      userId:         r.userId,
+      sessionId:      r.sessionId,
+      siteKey:        r.siteKey,
+      model:          r.model,
+      audioSeconds:   r.audioSeconds,
+      neuronsUsed:    r.neuronsUsed,
+      costUsd:        r.costUsd,
+      mode:           r.mode,
+      recordedAt:     new Date(r.recordedAt),
+    })),
+  });
+}

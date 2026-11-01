@@ -64,6 +64,8 @@ export default function SessionWithPlugins({
   const [showChannelSetup, setShowChannelSetup] = useState(false);
   const [qollabOpen,       setQollabOpen]       = useState(false);
   const wsRef              = useRef<WebSocket | null>(null);
+  // Was never assigned before: multi-channel captions had no socket to send on.
+  const onSocket           = useCallback((ws: WebSocket | null) => { wsRef.current = ws; }, []);
 
   const multiChannel = useMultiChannel({
     siteKey:      siteKey ?? "",
@@ -178,6 +180,7 @@ export default function SessionWithPlugins({
         siteKey={siteKey ?? ""}
         peerId={peerIdRef.current}
         onSourceSwitch={recording.switchStream}
+        onSocket={onSocket}
       />
 
       {qollabOpen && (

@@ -1,3 +1,4 @@
+import { DurableObject } from "cloudflare:workers";
 // src/durableObjects/recordingCoordinatorDO.ts
 // Coordinates recording for one session.
 // Tracks which chunks landed per peer, autosaves to R2 every 3min (JRPG pattern),
@@ -17,14 +18,13 @@ import { enqueueDiarization } from "@/lib/diarization/enqueue";
 
 const AUTOSAVE_INTERVAL_MS = 3 * 60 * 1000; // 3min, same as transcript autosave
 
-export class RecordingCoordinatorDO {
+export class RecordingCoordinatorDO extends DurableObject<Env> {
   private state: DurableObjectState;
-  private env: Env;
   private coordinator: RecordingCoordinatorState | null = null;
 
   constructor(state: DurableObjectState, env: Env) {
+    super(state, env);
     this.state = state;
-    this.env = env;
   }
 
   // ── HTTP API ──────────────────────────────────────────────────────────────

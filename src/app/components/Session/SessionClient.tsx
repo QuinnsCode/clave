@@ -14,20 +14,15 @@
 //   Plugin controls (RecordingIndicator etc.) render in a slim strip above
 //   the controls bar so the bar stays uncluttered.
 //   Hang up confirms if you're the last peer in the room.
+//
+// Connection logic lives in the headless engine (src/sdk/qlaveCall.ts):
+// ordered negotiation, ICE restart, signaling reconnect, receive-only join.
 
 import { useState, useEffect, useRef, useCallback, memo } from "react";
 import { Mic, MicOff, Video, VideoOff, Monitor, Camera, PhoneOff, Copy, Check, Drum } from "lucide-react";
 import type { SessionPlugin, SignalMessage } from "@/types";
 import { ICE_SERVERS } from "@/lib/webrtc/iceServers";
-
-interface Peer {
-  id:         string;
-  name:       string;
-  stream:     MediaStream | null;
-  pc:         RTCPeerConnection;
-  audioMuted: boolean;
-  videoMuted: boolean;
-}
+import { QlaveCall, type RemotePeer, type CallState } from "@/sdk/qlaveCall";
 
 type VideoSource = "camera" | "screen";
 
@@ -154,6 +149,8 @@ const CSS = `
   .btn-join:hover { background: #6d28d9; transform: translateY(-1px); }
   .btn-join:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
   .status-dot { width: 7px; height: 7px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 6px #22c55e; display: inline-block; margin-right: 5px; animation: pulse 2s infinite; }
+  .banner { padding: 8px 16px; text-align: center; font-size: 13px; background: rgba(250,204,21,0.1); color: #facc15; border-bottom: 1px solid rgba(250,204,21,0.2); }
+  .banner.err { background: rgba(248,113,113,0.1); color: #f87171; border-color: rgba(248,113,113,0.2); }
   @keyframes pulse { 0%,100%{opacity:1}50%{opacity:.5} }
   .tiles[data-count="1"] { grid-template-columns: 1fr; max-width: 900px; width: 100%; margin: 0 auto; }
   .tiles[data-count="2"] { grid-template-columns: 1fr 1fr; max-width: 1100px; width: 100%; margin: 0 auto; }
@@ -169,14 +166,21 @@ const CSS = `
   }
 `;
 
-function getWsUrl(sessionId: string, peerId: string, siteKey: string, roomCode: string): string {
-  const host  = window.location.host;
+function getWsUrl(sessionId: string, siteKey: string, roomCode: string): string {
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${proto}//${host}/__qlave/${sessionId}?siteKey=${siteKey}&peerId=${peerId}&roomCode=${roomCode}`;
+  const q = new URLSearchParams({ roomCode, ...(siteKey ? { siteKey } : {}) });
+  return `${proto}//${window.location.host}/__qlave/${sessionId}?${q}`;
 }
 
 function initials(name: string): string {
   return name.split(" ").map(w => w[0]).join("").toUpperCase().slice(0, 2);
+}
+
+/** Camera+mic, else mic only, else nothing (join to watch and listen). */
+async function getBestMedia(): Promise<{ stream: MediaStream | null; note: string | null }> {
+  try { return { stream: await navigator.mediaDevices.getUserMedia({ video: true, audio: true }), note: null }; } catch { /* next */ }
+  try { return { stream: await navigator.mediaDevices.getUserMedia({ audio: true }), note: "No camera available: joining with audio only." }; } catch { /* next */ }
+  return { stream: null, note: "No camera or microphone access: you can still see and hear others." };
 }
 
 function runPlugins<K extends keyof SessionPlugin>(
@@ -186,7 +190,7 @@ function runPlugins<K extends keyof SessionPlugin>(
 ): void {
   for (const plugin of plugins) {
     const fn = plugin[hook] as ((...a: any[]) => any) | undefined;
-    fn?.(...args);
+    try { fn?.(...args); } catch (e) { console.error(`[qlave] plugin ${String(hook)} failed`, e); }
   }
 }
 
@@ -195,30 +199,6 @@ function runMessagePlugins(plugins: SessionPlugin[], msg: SignalMessage): boolea
     if (plugin.onMessage?.(msg)) return true;
   }
   return false;
-}
-
-// -----------------------
-
-/** Add tracks from stream to a PC. Skips tracks already represented by a sender. */
-function addTracksToPC(pc: RTCPeerConnection, stream: MediaStream | null): void {
-  if (!pc || !stream) return;
-  const existingKinds = new Set(
-    pc.getSenders().map(s => s.track?.kind).filter(Boolean)
-  );
-  stream.getTracks().forEach(track => {
-    if (!existingKinds.has(track.kind)) {
-      pc.addTrack(track, stream);
-    }
-  });
-}
-
-/** Add stream tracks to every existing peer connection.
- *  Called when getUserMedia resolves after PCs already exist (late stream on mobile Safari). */
-function addStreamToAllPCs(peers: Map<string, Peer> | null, stream: MediaStream | null): void {
-  if (!peers || !stream) return;
-  peers.forEach(peer => {
-    if (peer?.pc) addTracksToPC(peer.pc, stream);
-  });
 }
 
 // ── VideoTile ─────────────────────────────────────────────────────────────────
@@ -247,9 +227,9 @@ const VideoTile = memo(function VideoTile({
   }, [stream, isSelf]);
 
   return (
-    <div className={`tile ${isSelf ? "self" : ""}`}>
-      <video ref={ref} autoPlay playsInline muted={isSelf} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-      {!stream && <div className="tile-avatar">{initials(name)}</div>}
+    <div className={`tile ${isSelf ? "self" : ""}`} data-testid={isSelf ? "tile-self" : "tile-peer"}>
+      <video ref={ref} autoPlay playsInline muted={isSelf} data-testid={isSelf ? "local-video" : "remote-video"} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+      {(!stream || !stream.getVideoTracks().length) && <div className="tile-avatar" style={{ position: "absolute" }}>{initials(name)}</div>}
       {needsTap && (
         <div
           onClick={() => ref.current?.play().then(() => setNeedsTap(false)).catch(() => {})}
@@ -284,6 +264,7 @@ export default function SessionClient({
   siteKey,
   renderLobbyExtra,
   onSourceSwitch,
+  onSocket,
 }: {
   sessionId:        string;
   roomCode:         string;
@@ -295,18 +276,23 @@ export default function SessionClient({
   // Called when the user switches video source so the recording hook can
   // swap its recorder to the new stream. Audio keeps recording regardless.
   onSourceSwitch?: (newStream: MediaStream) => void;
+  /** Receives the live signaling handle (stable across reconnects) once joined. */
+  onSocket?: (ws: WebSocket | null) => void;
 }) {
   const peerId          = useRef(peerIdProp ?? crypto.randomUUID());
-  const wsRef           = useRef<WebSocket | null>(null);
+  const callRef         = useRef<QlaveCall | null>(null);
   const localStreamRef  = useRef<MediaStream | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
-  const peersRef        = useRef<Map<string, Peer>>(new Map());
   const lobbyVideoRef   = useRef<HTMLVideoElement>(null);
   const pluginsRef      = useRef(plugins);
 
   const [phase,       setPhase]       = useState<"lobby" | "session">("lobby");
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
-  const [peers,       setPeers]       = useState<Peer[]>([]);
+  const [mediaReady,  setMediaReady]  = useState(false);
+  const [mediaNote,   setMediaNote]   = useState<string | null>(null);
+  const [peers,       setPeers]       = useState<RemotePeer[]>([]);
+  const [callState,   setCallState]   = useState<CallState>("idle");
+  const [callError,   setCallError]   = useState<string | null>(null);
   const [audioMuted,  setAudioMuted]  = useState(false);
   const [videoMuted,  setVideoMuted]  = useState(false);
   const [videoSource, setVideoSource] = useState<VideoSource>("camera");
@@ -318,161 +304,107 @@ export default function SessionClient({
   useEffect(() => { pluginsRef.current = plugins; }, [plugins]);
 
   useEffect(() => {
-    navigator.mediaDevices.getUserMedia({ video: true, audio: true })
-      .then(stream => {
-        localStreamRef.current = stream;
-        setLocalStream(stream);
-        addStreamToAllPCs(peersRef.current, stream);
-        if (lobbyVideoRef.current) lobbyVideoRef.current.srcObject = stream;
-      })
-      .catch(console.error);
-    return () => { localStreamRef.current?.getTracks().forEach(t => t.stop()); };
+    let cancelled = false;
+    getBestMedia().then(({ stream, note }) => {
+      if (cancelled) { stream?.getTracks().forEach(t => t.stop()); return; }
+      localStreamRef.current = stream;
+      setLocalStream(stream);
+      setMediaNote(note);
+      setMediaReady(true);
+      if (lobbyVideoRef.current && stream) lobbyVideoRef.current.srcObject = stream;
+    });
+    return () => {
+      cancelled = true;
+      localStreamRef.current?.getTracks().forEach(t => t.stop());
+    };
   }, []);
 
-  const createPeerConnection = useCallback((remotePeerId: string, remoteName: string): RTCPeerConnection => {
-    const pc = new RTCPeerConnection(ICE_SERVERS);
-    if (localStreamRef.current) addTracksToPC(pc, localStreamRef.current);
-
-    const remoteStream = new MediaStream();
-    pc.ontrack = e => {
-      e.streams[0].getTracks().forEach(t => remoteStream.addTrack(t));
-      const peer = peersRef.current.get(remotePeerId);
-      if (peer) {
-        peer.stream = remoteStream;
-        setPeers(Array.from(peersRef.current.values()));
-        runPlugins(pluginsRef.current, "onPeerStreamUpdated", { peerId: remotePeerId, displayName: peer.name, stream: remoteStream });
-      }
-    };
-
-    pc.onicecandidate = e => {
-      if (e.candidate && wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ type: "ice-candidate", to: remotePeerId, from: peerId.current, candidate: e.candidate }));
-      }
-    };
-
-    pc.onconnectionstatechange = () => {
-      if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
-        peersRef.current.delete(remotePeerId);
-        setPeers(Array.from(peersRef.current.values()));
-        runPlugins(pluginsRef.current, "onPeerLeft", remotePeerId);
-      }
-    };
-
-    const peer: Peer = { id: remotePeerId, name: remoteName, stream: null, pc, audioMuted: false, videoMuted: false };
-    peersRef.current.set(remotePeerId, peer);
-    setPeers(Array.from(peersRef.current.values()));
-    runPlugins(pluginsRef.current, "onPeerJoined", { peerId: remotePeerId, displayName: remoteName, stream: null });
-    return pc;
-  }, []);
-
-  const connect = useCallback((stream: MediaStream) => {
-    const ws = new WebSocket(getWsUrl(sessionId, peerId.current, siteKey, roomCode));
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      ws.send(JSON.stringify({ type: "join", name: peerName }));
-      runPlugins(pluginsRef.current, "onJoin", ws, peerId.current, stream);
-    };
-
-    ws.onmessage = async (e) => {
-      const msg: SignalMessage = JSON.parse(e.data);
-      if (runMessagePlugins(pluginsRef.current, msg)) return;
-
-      if (msg.type === "joined" && msg.peers) {
-        const names = msg.peerNames ?? {};
-        for (const pid of msg.peers) {
-          if (pid === peerId.current) continue;
-          const pc    = createPeerConnection(pid, names[pid] ?? pid.slice(0, 8));
-          const offer = await pc.createOffer();
-          await pc.setLocalDescription(offer);
-          ws.send(JSON.stringify({ type: "offer", to: pid, from: peerId.current, sdp: offer }));
-        }
-      }
-      if (msg.type === "peer-joined" && msg.peerId) {
-        if (!peersRef.current.has(msg.peerId))
-          createPeerConnection(msg.peerId, msg.name ?? msg.peerId.slice(0, 8));
-      }
-      if (msg.type === "offer" && msg.from && msg.sdp) {
-        if (!peersRef.current.has(msg.from)) createPeerConnection(msg.from, msg.from.slice(0, 8));
-        const pc = peersRef.current.get(msg.from)!.pc;
-        await pc.setRemoteDescription(msg.sdp);
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        ws.send(JSON.stringify({ type: "answer", to: msg.from, from: peerId.current, sdp: answer }));
-      }
-      if (msg.type === "answer" && msg.from && msg.sdp) {
-        const pc = peersRef.current.get(msg.from)?.pc;
-        if (pc) await pc.setRemoteDescription(msg.sdp);
-      }
-      if (msg.type === "ice-candidate" && msg.from && msg.candidate) {
-        const pc = peersRef.current.get(msg.from)?.pc;
-        if (pc) await pc.addIceCandidate(msg.candidate);
-      }
-      if (msg.type === "peer-left" && msg.peerId) {
-        peersRef.current.get(msg.peerId)?.pc.close();
-        peersRef.current.delete(msg.peerId);
-        setPeers(Array.from(peersRef.current.values()));
-        runPlugins(pluginsRef.current, "onPeerLeft", msg.peerId);
-      }
-    };
-
-    ws.onclose = () => {
-      peersRef.current.forEach(p => p.pc.close());
-      peersRef.current.clear();
-      setPeers([]);
-    };
-  }, [sessionId, siteKey, roomCode, peerName, createPeerConnection]);
-
-  const join = useCallback(() => {
+  const join = useCallback(async () => {
+    if (callRef.current) return;
     const stream = localStreamRef.current;
-    if (!stream) return;
     setPhase("session");
-    connect(stream);
-  }, [connect]);
+    setCallError(null);
+
+    // TURN credentials for this room (Cloudflare Realtime when configured).
+    let iceServers: RTCIceServer[] = ICE_SERVERS.iceServers;
+    try {
+      const res = await fetch(`/api/qlave/ice?roomCode=${encodeURIComponent(roomCode)}`);
+      if (res.ok) iceServers = ((await res.json()) as { iceServers: RTCIceServer[] }).iceServers;
+    } catch { /* bundled defaults */ }
+
+    const call = new QlaveCall({
+      signalingUrl: getWsUrl(sessionId, siteKey, roomCode),
+      iceServers,
+      localStream: stream,
+      name: peerName,
+      peerId: peerId.current,
+    });
+    callRef.current = call;
+    if (audioMuted) call.setAudioEnabled(false);
+    if (videoMuted) call.setVideoEnabled(false);
+
+    const sync = () => setPeers(call.remotePeers);
+    call.addEventListener("state", e => setCallState((e as CustomEvent).detail.state));
+    call.addEventListener("error", e => setCallError((e as CustomEvent).detail.message));
+    call.addEventListener("peer-joined", e => {
+      const p = (e as CustomEvent<RemotePeer>).detail;
+      sync();
+      runPlugins(pluginsRef.current, "onPeerJoined", { peerId: p.peerId, displayName: p.name, stream: null });
+    });
+    call.addEventListener("peer-stream", e => {
+      const p = (e as CustomEvent<RemotePeer>).detail;
+      sync();
+      runPlugins(pluginsRef.current, "onPeerStreamUpdated", { peerId: p.peerId, displayName: p.name, stream: p.stream });
+    });
+    call.addEventListener("peer-updated", sync);
+    call.addEventListener("peer-left", e => {
+      sync();
+      runPlugins(pluginsRef.current, "onPeerLeft", (e as CustomEvent).detail.peerId);
+    });
+    call.addEventListener("message", e => {
+      runMessagePlugins(pluginsRef.current, (e as CustomEvent).detail as SignalMessage);
+    });
+
+    let pluginsStarted = false;
+    call.addEventListener("joined", () => {
+      if (pluginsStarted) return;
+      pluginsStarted = true;
+      // A handle that follows reconnects, so plugins never hold a dead socket.
+      const ws = call.socket as unknown as WebSocket;
+      onSocket?.(ws);
+      if (stream) runPlugins(pluginsRef.current, "onJoin", ws, call.peerId, stream);
+    });
+
+    call.join().catch(() => { /* surfaced via "error" */ });
+  }, [sessionId, siteKey, roomCode, peerName, audioMuted, videoMuted, onSocket]);
 
   // ── Video source switching ────────────────────────────────────────────────
+
+  const switchToCamera = useCallback(async () => {
+    screenStreamRef.current?.getTracks().forEach(t => t.stop());
+    screenStreamRef.current = null;
+    await callRef.current?.setScreenTrack(null);
+    const cameraStream = localStreamRef.current;
+    setLocalStream(cameraStream);
+    setVideoSource("camera");
+    if (cameraStream) onSourceSwitch?.(cameraStream);
+  }, [onSourceSwitch]);
 
   const switchToScreen = useCallback(async () => {
     try {
       const screen      = await navigator.mediaDevices.getDisplayMedia({ video: true });
       screenStreamRef.current = screen;
       const screenTrack = screen.getVideoTracks()[0];
-
-      // Replace track for all peers — wrapped in case a PC is mid-close
-      peersRef.current.forEach(p => {
-        const sender = p.pc.getSenders().find(s => s.track?.kind === "video");
-        try { if (sender) sender.replaceTrack(screenTrack); } catch { /* peer disconnecting */ }
-      });
-
+      await callRef.current?.setScreenTrack(screenTrack);
       setLocalStream(screen);
       setVideoSource("screen");
       onSourceSwitch?.(screen);
-
       // Revert to camera when user stops screen share via browser UI
-      screenTrack.onended = () => switchToCamera();
+      screenTrack.onended = () => { switchToCamera(); };
     } catch {
       // User cancelled the picker — stay on camera
     }
-  }, [onSourceSwitch]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const switchToCamera = useCallback(() => {
-    const cameraStream = localStreamRef.current;
-    if (!cameraStream) return;
-
-    screenStreamRef.current?.getTracks().forEach(t => t.stop());
-    screenStreamRef.current = null;
-
-    const cameraTrack = cameraStream.getVideoTracks()[0];
-    // Replace track for all peers — wrapped in case a PC is mid-close
-    peersRef.current.forEach(p => {
-      const sender = p.pc.getSenders().find(s => s.track?.kind === "video");
-      try { if (sender && cameraTrack) sender.replaceTrack(cameraTrack); } catch { /* peer disconnecting */ }
-    });
-
-    setLocalStream(cameraStream);
-    setVideoSource("camera");
-    onSourceSwitch?.(cameraStream);
-  }, [onSourceSwitch]);
+  }, [onSourceSwitch, switchToCamera]);
 
   const handleSourceToggle = useCallback((source: VideoSource) => {
     if (source === "screen") switchToScreen();
@@ -482,20 +414,23 @@ export default function SessionClient({
   const toggleAudio = () => {
     const muted = !audioMuted;
     localStreamRef.current?.getAudioTracks().forEach(t => { t.enabled = !muted; });
+    callRef.current?.setAudioEnabled(!muted);
     setAudioMuted(muted);
   };
 
   const toggleVideo = () => {
     const muted = !videoMuted;
     localStreamRef.current?.getVideoTracks().forEach(t => { t.enabled = !muted; });
+    callRef.current?.setVideoEnabled(!muted);
     setVideoMuted(muted);
   };
 
   const leave = () => {
     // Confirm if last peer in room — fat finger protection
     if (peers.length === 0 && !window.confirm("You're the last one here — end the session?")) return;
-    wsRef.current?.send(JSON.stringify({ type: "leave" }));
-    wsRef.current?.close();
+    callRef.current?.leave();
+    callRef.current = null;
+    onSocket?.(null);
     localStreamRef.current?.getTracks().forEach(t => t.stop());
     screenStreamRef.current?.getTracks().forEach(t => t.stop());
     runPlugins(pluginsRef.current, "onLeave");
@@ -511,10 +446,9 @@ export default function SessionClient({
   useEffect(() => {
     return () => {
       runPlugins(pluginsRef.current, "onLeave");
-      wsRef.current?.close();
+      callRef.current?.leave();
       localStreamRef.current?.getTracks().forEach(t => t.stop());
       screenStreamRef.current?.getTracks().forEach(t => t.stop());
-      peersRef.current.forEach(p => p.pc.close());
     };
   }, []);
 
@@ -564,7 +498,8 @@ export default function SessionClient({
                 }}
               />
             )}
-            <button className="btn-join" onClick={join} disabled={!localStream || (!user && !guestName.trim())}>
+            {mediaNote && <p className="lobby-sub">{mediaNote}</p>}
+            <button className="btn-join" onClick={join} disabled={!mediaReady || (!user && !guestName.trim())}>
               Join room
             </button>
             {/* Multi-channel setup hidden — DO NOT DELETE, kept for future restore */}
@@ -577,7 +512,7 @@ export default function SessionClient({
 
   const allTiles = [
     { id: peerId.current, name: `${peerName} (you)`, stream: localStream, isSelf: true, audioMuted, videoMuted },
-    ...peers.map(p => ({ id: p.id, name: p.name, stream: p.stream, isSelf: false, audioMuted: p.audioMuted, videoMuted: p.videoMuted })),
+    ...peers.map(p => ({ id: p.peerId, name: p.name, stream: p.stream.getTracks().length ? p.stream : null, isSelf: false, audioMuted: p.audioMuted, videoMuted: p.videoMuted })),
   ];
   const tileCount = Math.min(allTiles.length, 6);
 
@@ -587,7 +522,7 @@ export default function SessionClient({
       <div className="session">
         <div className="session-header">
           <a href="/" className="pill"><Drum size={13} strokeWidth={2.5} /> qlave</a>
-          <div className="peer-count"><span className="status-dot" />{allTiles.length} in room</div>
+          <div className="peer-count" data-testid="peer-count"><span className="status-dot" />{allTiles.length} in room</div>
           <div className="header-right">
             <button className="btn-share" onClick={copyLink}>
               {copied ? <Check size={13} /> : <Copy size={13} />}
@@ -596,6 +531,8 @@ export default function SessionClient({
           </div>
         </div>
 
+        {callState === "reconnecting" && <div className="banner">Reconnecting to the room…</div>}
+        {callError && <div className="banner err">{callError}</div>}
         <div className="session-body">
           <div className="tiles-container">
             <div className="tiles" data-count={tileCount}>
