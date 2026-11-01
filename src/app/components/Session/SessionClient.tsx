@@ -23,6 +23,7 @@ import { Mic, MicOff, Video, VideoOff, Monitor, Camera, PhoneOff, Copy, Check, D
 import type { SessionPlugin, SignalMessage } from "@/types";
 import { ICE_SERVERS } from "@/lib/webrtc/iceServers";
 import { QlaveCall, type RemotePeer, type CallState } from "@/sdk/qlaveCall";
+import { useEarlyInput } from "@/app/hooks/useEarlyInput";
 
 type VideoSource = "camera" | "screen";
 
@@ -298,6 +299,7 @@ export default function SessionClient({
   const [videoSource, setVideoSource] = useState<VideoSource>("camera");
   const [copied,      setCopied]      = useState(false);
   const [guestName,   setGuestName]   = useState("");
+  const guestNameRef = useEarlyInput(guestName, setGuestName);
 
   const peerName = user?.name ?? (guestName.trim() || "Guest");
 
@@ -458,7 +460,7 @@ export default function SessionClient({
   if (phase === "lobby") {
     return (
       <>
-        <style dangerouslySetInnerHTML={{ __html: CSS }} />
+        <style href="qlave-session-css" precedence="default">{CSS}</style>
         <div className="session">
           <div className="session-header">
             <a href="/" className="pill"><Drum size={13} strokeWidth={2.5} /> qlave</a>
@@ -486,8 +488,9 @@ export default function SessionClient({
             </div>
             {!user && (
               <input
+                ref={guestNameRef}
                 placeholder="Your name"
-                value={guestName}
+                defaultValue=""
                 onChange={e => setGuestName(e.target.value)}
                 onKeyDown={e => e.key === "Enter" && guestName.trim() && join()}
                 style={{
@@ -518,7 +521,7 @@ export default function SessionClient({
 
   return (
     <>
-      <style dangerouslySetInnerHTML={{ __html: CSS }} />
+      <style href="qlave-session-css" precedence="default">{CSS}</style>
       <div className="session">
         <div className="session-header">
           <a href="/" className="pill"><Drum size={13} strokeWidth={2.5} /> qlave</a>

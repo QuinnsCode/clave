@@ -3,6 +3,7 @@
 
 import { useState, useEffect, useRef } from "react";
 import { QlaveCall, type RemotePeer } from "@/sdk/qlaveCall";
+import { useEarlyInput } from "@/app/hooks/useEarlyInput";
 
 type Status = "idle" | "acquiring" | "connecting" | "ready" | "connected" | "error" | "disconnected";
 import { Drum } from "lucide-react";
@@ -123,6 +124,8 @@ function VideoTile({ stream, label, isLocal }: { stream: MediaStream | null; lab
 export default function QlaveTestClient() {
   const [sessionId, setSessionId] = useState("test-1");
   const [displayName, setDisplayName] = useState("");
+  const sessionIdRef = useEarlyInput(sessionId, setSessionId);
+  const displayNameRef = useEarlyInput(displayName, setDisplayName);
   const [status, setStatus] = useState<Status>("idle");
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [peers, setPeers] = useState<RemotePeer[]>([]);
@@ -192,7 +195,7 @@ export default function QlaveTestClient() {
 
   return (
     <div className="page">
-      <style dangerouslySetInnerHTML={{ __html: CSS }} />
+      <style href="qlave-test-css" precedence="default">{CSS}</style>
       <nav className="nav">
         <a href="/"><span className="pill"><Drum size={13} strokeWidth={2.5} /> qlave</span></a>
         <div className="nav-right">
@@ -213,11 +216,11 @@ export default function QlaveTestClient() {
             <div className="fields">
               <div className="field">
                 <span className="field-label">Session ID</span>
-                <input className="field-input" value={sessionId} onChange={e => setSessionId(e.target.value)} placeholder="test-1" spellCheck={false} />
+                <input ref={sessionIdRef} className="field-input" defaultValue="test-1" onChange={e => setSessionId(e.target.value)} placeholder="test-1" spellCheck={false} />
               </div>
               <div className="field">
                 <span className="field-label">Display name</span>
-                <input className="field-input" value={displayName} onChange={e => setDisplayName(e.target.value)} placeholder="Aragorn" />
+                <input ref={displayNameRef} className="field-input" defaultValue="" onChange={e => setDisplayName(e.target.value)} placeholder="Aragorn" />
               </div>
             </div>
             <span className="config-hint">Share the same Session ID with another tab to connect.</span>

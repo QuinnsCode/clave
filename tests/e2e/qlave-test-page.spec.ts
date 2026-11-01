@@ -30,15 +30,11 @@ test("two signed-in tabs on /qlave-test connect", async () => {
     const ctx = await browser.newContext({ permissions: ["camera", "microphone"] });
     await signIn(ctx);
     const page = await ctx.newPage();
-    await page.goto(`${BASE}/qlave-test`);
-    const id = page.getByPlaceholder("test-1");
-    const nameBox = page.getByPlaceholder("Aragorn");
-    // Retry until hydrated: inputs typed before hydration get reset.
-    await expect(async () => {
-      await id.fill(room);
-      await nameBox.fill(name);
-      await expect(page.getByRole("heading", { name: new RegExp(room) })).toBeVisible({ timeout: 1_000 });
-    }).toPass({ timeout: 30_000 });
+    // Type as soon as the HTML arrives, before React hydrates: the text must survive.
+    await page.goto(`${BASE}/qlave-test`, { waitUntil: "commit" });
+    await page.getByPlaceholder("test-1").fill(room);
+    await page.getByPlaceholder("Aragorn").fill(name);
+    await expect(page.getByRole("heading", { name: new RegExp(room) })).toBeVisible({ timeout: 30_000 });
     await page.getByRole("button", { name: "Join session" }).click();
     pages.push(page);
   }

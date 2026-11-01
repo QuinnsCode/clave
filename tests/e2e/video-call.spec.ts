@@ -22,18 +22,15 @@ async function makeRoom(ctx: BrowserContext): Promise<string> {
   return (await res.json()).code;
 }
 
-/** Type the guest name, retrying until React has hydrated and the Join button enables. */
+/** Type the guest name as soon as the HTML is there, without waiting for React. */
 async function fillGuestName(page: Page, name: string) {
   const input = page.getByPlaceholder("Your name");
-  const btn = page.getByRole("button", { name: "Join room" });
-  await expect(async () => {
-    if (await input.isVisible().catch(() => false)) await input.fill(name);
-    await expect(btn).toBeEnabled({ timeout: 1_000 });
-  }).toPass({ timeout: 30_000 });
+  if (await input.isVisible().catch(() => false)) await input.fill(name);
 }
 
 async function joinRoom(page: Page, code: string, name = "Guest " + Math.random().toString(36).slice(2, 6)) {
-  await page.goto(`${BASE}/s/${code}`);
+  await page.goto(`${BASE}/s/${code}`, { waitUntil: "commit" });
+  await page.getByPlaceholder("Your name").waitFor();
   await fillGuestName(page, name);
   const btn = page.getByRole("button", { name: "Join room" });
   await expect(btn).toBeEnabled({ timeout: 30_000 });
@@ -120,7 +117,7 @@ test("a peer without a camera can still join and receive", async () => {
   const a = await ctxA.newPage();
   const b = await ctxB.newPage();
   await joinRoom(a, code);
-  await b.goto(`${BASE}/s/${code}`);
+  await b.goto(`${BASE}/s/${code}`, { waitUntil: "commit" });
   await expect(b.getByText("you can still see and hear others")).toBeVisible({ timeout: 30_000 });
   await fillGuestName(b, "No Cam");
   await b.getByRole("button", { name: "Join room" }).click();
