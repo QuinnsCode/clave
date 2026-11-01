@@ -105,7 +105,7 @@ export const ROUTE_POLICIES: Array<{ prefix: string; policy: RoutePolicy; force?
 
   // ── AV + AI routes ─────────────────────────────────────────────────────────
   { prefix: "/s",                    policy: POLICY.avAiPublic },
-  { prefix: "/qlave-test",           policy: POLICY.avAi },
+  { prefix: "/qlave-test",           policy: { ...POLICY.avAi, level: "session" } }, // signed in; no org needed
   { prefix: "/transcribe-test",      policy: POLICY.avAi },
 
   // ── Session only — ctx.user, no org ───────────────────────────────────────

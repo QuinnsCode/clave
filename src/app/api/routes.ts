@@ -76,6 +76,11 @@ export const apiRoutes = [
     return handler({ request, ctx });
   }),
 
+  route("/qlave/test-ticket", async ({ request, ctx }) => {
+    const { default: handler } = await import("@/app/api/qlave/testTicket");
+    return handler({ request, ctx });
+  }),
+
   route("/qlave/ice", async ({ request }) => {
     const { default: handler } = await import("@/app/api/qlave/ice");
     return handler({ request });

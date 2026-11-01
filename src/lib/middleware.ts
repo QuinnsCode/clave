@@ -61,7 +61,7 @@ export const ROUTES: RouteConfig[] = [
   { prefix: "/api/",                 auth: "optional"               },
 
   // ── Required auth + AV ────────────────────────────────────────────────────
-  { prefix: "/qlave-test",           auth: "required", av: true,  org: true },
+  { prefix: "/qlave-test",           auth: "required", av: true   }, // signed in; no org needed
   { prefix: "/transcribe-test",      auth: "required", av: true,  org: true },
 
   // ── Required auth + org ───────────────────────────────────────────────────
