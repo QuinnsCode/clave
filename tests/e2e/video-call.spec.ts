@@ -30,7 +30,8 @@ async function fillGuestName(page: Page, name: string) {
 
 async function joinRoom(page: Page, code: string, name = "Guest " + Math.random().toString(36).slice(2, 6)) {
   await page.goto(`${BASE}/s/${code}`, { waitUntil: "commit" });
-  await page.getByPlaceholder("Your name").waitFor();
+  // Guests get a name box; a signed-in host (cookies stick over https) goes straight to "Join room".
+  await page.getByPlaceholder("Your name").or(page.getByRole("button", { name: "Join room" })).first().waitFor();
   await fillGuestName(page, name);
   const btn = page.getByRole("button", { name: "Join room" });
   await expect(btn).toBeEnabled({ timeout: 30_000 });
