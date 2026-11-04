@@ -34,6 +34,7 @@ declare namespace Cloudflare {
 		R2_ACCESS_KEY_ID: string;
 		R2_SECRET_ACCESS_KEY: string;
 		XAI_API_KEY: string;
+		QLAVE_ROSTER_SECRET?: string;
 		SESSION_DURABLE_OBJECT: DurableObjectNamespace<import("./src/worker").SessionDurableObject>;
 		USER_SESSION_DO: DurableObjectNamespace<import("./src/worker").UserSessionDO>;
 		QLAVE_SESSION_DO: DurableObjectNamespace<import("./src/worker").QlaveSessionDO>;

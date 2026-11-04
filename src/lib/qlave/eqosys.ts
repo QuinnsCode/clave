@@ -6,6 +6,8 @@
 // Env:
 //   EQOSYS_ISSUER     default https://eqosys.qntbr.com
 //   QLAVE_EQOSYS_APPS comma-separated eqosys app ids allowed to use Qlave (aud)
+//   QLAVE_ROSTER_SECRET secret: HMAC key for voice roster POSTs to eqosys (src/lib/qlave/roster.ts);
+//                     same value as on eqosys. Unset: Qlave tells eqosys nothing.
 
 import { env } from "cloudflare:workers";
 
