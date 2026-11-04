@@ -11,6 +11,8 @@
 //
 // A voice room is a normal QlaveSessionDO named "voice:<room>". Which rooms are
 // live, and who is in which, is indexed in KV so erase and end can find them.
+// Whenever a room's people change, the room POSTs them to eqosys
+// (${EQOSYS_ISSUER}/q/qlave/roster, HMAC-signed with QLAVE_ROSTER_SECRET): src/lib/qlave/roster.ts.
 
 import { env } from "cloudflare:workers";
 import { verifyEqosysToken, bearer } from "@/lib/qlave/eqosys";

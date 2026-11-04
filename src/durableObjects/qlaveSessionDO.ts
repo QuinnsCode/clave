@@ -18,6 +18,7 @@ import { setupDb, db } from "@/db";
 import { signTicket } from "@/lib/qlave/tickets";
 import { getIceServers } from "@/lib/qlave/ice";
 import { roomKey, subKey } from "@/lib/qlave/voice";
+import { postRoster } from "@/lib/qlave/roster";
 
 const TRANSCRIPT_SAVE_INTERVAL_MS = 3 * 60 * 1000;
 const KV_TTL_SECONDS = 60 * 60 * 24 * 2; // 48hr — covers crash + recovery window
@@ -28,6 +29,7 @@ const MAX_MESSAGE_BYTES = 64 * 1024;
 const DEFAULT_MAX_PEERS = 12;
 const PEER_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
 const VOICE_RESUME_TTL_S = 12 * 60 * 60;  // reconnects within a voice session
+const ROSTER_DEBOUNCE_MS = 250;           // coalesce roster changes before telling eqosys
 
 /** What the worker verified about this connection. */
 export interface QlaveAuthContext {
@@ -86,6 +88,7 @@ interface VoiceState {
 export class QlaveSessionDO extends DurableObject<Env> {
   private state: DurableObjectState;
   private session: SessionState | null = null;
+  private rosterPending = false;
 
   constructor(state: DurableObjectState, env: Env) {
     super(state, env);
@@ -308,7 +311,7 @@ export class QlaveSessionDO extends DurableObject<Env> {
     const wasJoined = a.joined;
     ws.serializeAttachment({ ...a, name: cleanName, joined: true } satisfies SocketAttachment);
     if (!wasJoined) this.broadcast(a.peerId, { type: "peer-joined", peerId: a.peerId, name: cleanName, ...(a.voice ? { sub: a.voice.sub } : {}) });
-    if (a.voice) await this.indexVoice(a.voice, true);
+    if (a.voice) { await this.indexVoice(a.voice, true); this.tellRoster(a.voice.room); }
 
     const session = await this.load();
     if (session) {
@@ -331,7 +334,7 @@ export class QlaveSessionDO extends DurableObject<Env> {
       this.broadcast(a.peerId, { type: "peer-left", peerId: a.peerId });
       if (session) this.accumulatePeerMinutes(session, a.peerId, Date.now());
     }
-    if (a.voice) await this.indexVoice(a.voice, false, ws);
+    if (a.voice) { await this.indexVoice(a.voice, false, ws); this.tellRoster(a.voice.room); }
 
     await this.syncKV();
     if (this.joinedSockets().filter(s => s.ws !== ws).length === 0 && session && !session.flushed) {
@@ -574,6 +577,22 @@ export class QlaveSessionDO extends DurableObject<Env> {
     }
   }
 
+  /**
+   * Tell eqosys who is in this voice room (src/lib/qlave/roster.ts). Changes within
+   * ROSTER_DEBOUNCE_MS share one POST, which reads the room as it is when it fires.
+   * Runs under waitUntil: never delays signalling, never throws into the room.
+   */
+  private tellRoster(room: string): void {
+    if (this.rosterPending || !(this.env as any).QLAVE_ROSTER_SECRET) return;
+    this.rosterPending = true;
+    this.state.waitUntil((async () => {
+      await new Promise(r => setTimeout(r, ROSTER_DEBOUNCE_MS));
+      this.rosterPending = false;
+      const people = this.joinedSockets().flatMap(s => s.a.voice ? [{ sub: s.a.voice.sub, name: s.a.voice.name }] : []);
+      await postRoster(this.env as any, room, people);
+    })().catch(e => console.error("[QlaveSessionDO] roster failed:", e)));
+  }
+
   private async handleAdmin(order: { t?: string; sub?: string; on?: boolean; reason?: string }): Promise<Response> {
     const vs = await this.voiceState();
     const sockets = (sub?: string) => this.joinedSockets().filter(s => s.a.voice && (!sub || s.a.voice.sub === sub));
@@ -598,6 +617,8 @@ export class QlaveSessionDO extends DurableObject<Env> {
       vs.kicked = {};
       await this.state.storage.put("voice", vs);
       for (const { ws, a } of this.joinedSockets()) { await this.handleClose(ws, a); try { ws.close(4005, "ended"); } catch { /* gone */ } }
+      const sid = (await this.load())?.sessionId;
+      if (sid?.startsWith("voice:")) this.tellRoster(sid.slice("voice:".length));
       return Response.json({ ok: true });
     }
     return new Response("Bad order", { status: 400 });

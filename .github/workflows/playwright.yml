@@ -23,7 +23,7 @@ jobs:
     - name: Install Playwright Chromium
       run: pnpm exec playwright install --with-deps chromium
     - name: Local dev vars
-      run: printf 'BETTER_AUTH_SECRET=ci-only-secret-0123456789abcdef0123456789\nQLAVE_TICKET_SECRET=ci-only-ticket-secret-0123456789abcdef\nEQOSYS_ISSUER=http://localhost:5287\n' > .dev.vars
+      run: printf 'BETTER_AUTH_SECRET=ci-only-secret-0123456789abcdef0123456789\nQLAVE_TICKET_SECRET=ci-only-ticket-secret-0123456789abcdef\nEQOSYS_ISSUER=http://localhost:5287\nQLAVE_ROSTER_SECRET=ci-only-roster-secret-0123456789abcdef\n' > .dev.vars
     - name: Local database
       run: pnpm exec prisma generate && pnpm exec wrangler d1 migrations apply DB --local
     - name: Run video call + voice e2e

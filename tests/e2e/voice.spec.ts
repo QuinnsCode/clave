@@ -1,9 +1,11 @@
 // tests/e2e/voice.spec.ts
 // Qollab voice channels against Qlave's side of rustybuns apps/eqosys/QLAVE.md:
 // eqosys tickets, the browser client (src/sdk/voice.ts), and eqosys's orders.
-// Runs its own fake eqosys (a JWKS on :5287 that the dev server's EQOSYS_ISSUER points at).
+// Runs its own fake eqosys (a JWKS on :5287 that the dev server's EQOSYS_ISSUER points at),
+// which also takes the rooms' signed roster POSTs (QLAVE_ROSTER_SECRET in .dev.vars).
 import { test, expect, chromium, type Browser, type Page } from "@playwright/test";
 import http from "node:http";
+import { createHmac, timingSafeEqual } from "node:crypto";
 
 const BASE = process.env.QLAVE_BASE_URL ?? "http://localhost:5173";
 const ISS = "http://localhost:5287";
@@ -11,6 +13,10 @@ const FAKE_MEDIA = ["--use-fake-ui-for-media-stream", "--use-fake-device-for-med
 const { subtle } = globalThis.crypto;
 // Fresh key id per run: the worker caches eqosys keys by kid for five minutes.
 const KID = `voice-test-${Date.now()}`;
+const ROSTER_SECRET = process.env.QLAVE_ROSTER_SECRET ?? "ci-only-roster-secret-0123456789abcdef";
+/** room -> every roster eqosys accepted for it, in arrival order. */
+const rosters = new Map<string, { sub: string; name: string }[][]>();
+const lastRoster = (room: string) => (rosters.get(room)?.at(-1) ?? []).map(p => `${p.sub}:${p.name}`).sort().join(",");
 
 let keys: CryptoKeyPair;
 let jwks: http.Server;
@@ -69,7 +75,21 @@ const gone = (page: Page) => page.evaluate(() => (window as any).voice.gone as s
 test.beforeAll(async () => {
   keys = await subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]) as CryptoKeyPair;
   const pub = await subtle.exportKey("jwk", keys.publicKey);
-  jwks = http.createServer((_req, res) => {
+  jwks = http.createServer((req, res) => {
+    if (req.method === "POST" && req.url === "/q/qlave/roster") {
+      let raw = "";
+      req.on("data", c => { raw += c; });
+      req.on("end", () => {
+        const want = Buffer.from(createHmac("sha256", ROSTER_SECRET).update(raw).digest("hex"));
+        const got = Buffer.from(String(req.headers["x-qlave-signature"] ?? ""));
+        if (got.length !== want.length || !timingSafeEqual(got, want)) { res.statusCode = 401; return res.end(); }
+        const b = JSON.parse(raw);
+        if (typeof b.room !== "string" || !Array.isArray(b.in) || typeof b.at !== "number") { res.statusCode = 400; return res.end(); }
+        rosters.set(b.room, [...(rosters.get(b.room) ?? []), b.in]);
+        res.end("{}");
+      });
+      return;
+    }
     res.setHeader("content-type", "application/json");
     res.end(JSON.stringify({ keys: [{ ...pub, kid: KID, alg: "ES256", use: "sig" }] }));
   });
@@ -120,6 +140,8 @@ test("owner's mute, kick, erase and end reach voice", async () => {
   expect(await joinVoice(a, await ticket("u-alice", "Alice", room))).toBe("joined");
   expect(await joinVoice(b, await ticket("u-bob", "Bob", room))).toBe("joined");
   await expect.poll(async () => (await speakers(a)).length, { timeout: 20_000 }).toBe(2);
+  // eqosys hears who is in the room, signed.
+  await expect.poll(() => lastRoster(room), { timeout: 10_000 }).toBe("u-alice:Alice,u-bob:Bob");
 
   // Orders need an admin token.
   expect(await order({ t: "mute", room, sub: "u-bob", on: true }, "qlave")).toBe(401);
@@ -138,6 +160,7 @@ test("owner's mute, kick, erase and end reach voice", async () => {
   expect(await order({ t: "kick", room, sub: "u-bob" })).toBe(200);
   await expect.poll(() => gone(b), { timeout: 10_000 }).toBe("kicked");
   await expect.poll(async () => (await speakers(a)).length, { timeout: 10_000 }).toBe(1);
+  await expect.poll(() => lastRoster(room), { timeout: 10_000 }).toBe("u-alice:Alice");
 
   // A fresh ticket lets Bob back in.
   const b2 = await voicePage();
@@ -151,6 +174,7 @@ test("owner's mute, kick, erase and end reach voice", async () => {
   // End (space deleted): every room under the prefix ends.
   expect(await order({ t: "end", prefix: `space:${id}:` })).toBe(200);
   await expect.poll(() => gone(a), { timeout: 15_000 }).toBe("ended");
+  await expect.poll(() => lastRoster(room), { timeout: 10_000 }).toBe("");
 
   // Nothing to do is still 200; a bad order is 400.
   expect(await order({ t: "end", prefix: "space:nobody:" })).toBe(200);
