@@ -11,6 +11,8 @@ export interface TicketClaims {
   name?: string;
   app?: string | null;  // eqosys app id the room belongs to
   maxPeers?: number;
+  voice?: boolean;      // a resume ticket for a Qollab voice room
+  iatMs?: number;       // when it was minted (ms); set by signTicket
   exp: number;          // unix seconds
 }
 
@@ -37,8 +39,9 @@ async function key(): Promise<CryptoKey> {
   return crypto.subtle.importKey("raw", enc.encode(secret()), { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
 }
 
-export async function signTicket(claims: Omit<TicketClaims, "exp">, ttlSeconds = 15 * 60): Promise<string> {
-  const body = b64url(enc.encode(JSON.stringify({ ...claims, exp: Math.floor(Date.now() / 1000) + ttlSeconds })));
+export async function signTicket(claims: Omit<TicketClaims, "exp" | "iatMs">, ttlSeconds = 15 * 60): Promise<string> {
+  const now = Date.now();
+  const body = b64url(enc.encode(JSON.stringify({ ...claims, iatMs: now, exp: Math.floor(now / 1000) + ttlSeconds })));
   const sig = new Uint8Array(await crypto.subtle.sign("HMAC", await key(), enc.encode(body)));
   return `qt1.${body}.${b64url(sig)}`;
 }

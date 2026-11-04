@@ -18,6 +18,8 @@ export type CallState = "idle" | "connecting" | "joined" | "reconnecting" | "lef
 export interface RemotePeer {
   peerId: string;
   name: string;
+  /** eqosys id, in voice rooms. */
+  sub?: string;
   stream: MediaStream;
   audioMuted: boolean;
   videoMuted: boolean;
@@ -90,6 +92,16 @@ export class QlaveCall extends EventTarget {
   }
 
   // ── Public API ─────────────────────────────────────────────────────────────
+
+  /** Where the next reconnect goes (e.g. a resume ticket that replaces a single-use one). */
+  setSignalingUrl(url: string): void {
+    this.opts = { ...this.opts, signalingUrl: url };
+  }
+
+  /** The peer connection to a remote peer, for stats (audio levels and the like). */
+  peerConnection(peerId: string): RTCPeerConnection | null {
+    return this.peers.get(peerId)?.pc ?? null;
+  }
 
   get remotePeers(): RemotePeer[] {
     return [...this.peers.values()].map(p => p.info);
@@ -173,7 +185,7 @@ export class QlaveCall extends EventTarget {
       if (this.state === "left") return;
       // 4xxx = server refused us (bad ticket, room full); don't hammer it.
       if (e.code >= 4000 && e.code < 5000) {
-        this.fail(e.reason || `Refused (${e.code})`);
+        this.fail(e.reason || `Refused (${e.code})`, e.code);
         return;
       }
       this.scheduleReconnect();
@@ -182,17 +194,17 @@ export class QlaveCall extends EventTarget {
 
   private scheduleReconnect(): void {
     const max = this.opts.maxReconnects ?? 10;
-    if (this.reconnects >= max) { this.fail("Lost connection to the room"); return; }
+    if (this.reconnects >= max) { this.fail("Lost connection to the room", 0); return; }
     this.setState("reconnecting");
     const delay = Math.min(15000, 500 * 2 ** this.reconnects) * (0.75 + Math.random() * 0.5);
     this.reconnects++;
     this.reconnectTimer = setTimeout(() => this.openSocket(), delay);
   }
 
-  private fail(message: string): void {
+  private fail(message: string, code = 0): void {
     this.setState("error");
-    this.dispatchEvent(new CustomEvent("fatal", { detail: { message } }));
-    this.dispatchEvent(new CustomEvent("error", { detail: { message } }));
+    this.dispatchEvent(new CustomEvent("fatal", { detail: { message, code } }));
+    this.dispatchEvent(new CustomEvent("error", { detail: { message, code } }));
   }
 
   private setState(s: CallState): void {
@@ -210,21 +222,24 @@ export class QlaveCall extends EventTarget {
         this.everJoined = true;
         // After a signaling reconnect, others saw us leave and tore down; start clean.
         if (rejoin) for (const id of [...this.peers.keys()]) this.dropPeer(id);
+        // The room may hand out ICE servers (voice rooms do), before any peer connection exists.
+        if (Array.isArray(msg.iceServers) && msg.iceServers.length) this.iceServers = msg.iceServers;
         const names: Record<string, string> = msg.peerNames ?? {};
+        const subs: Record<string, string> = msg.peerSubs ?? {};
         for (const pid of (msg.peers as string[] ?? [])) {
           if (pid === this.peerId) continue;
-          this.ensurePeer(pid, names[pid] ?? "Guest", true);
+          this.ensurePeer(pid, names[pid] ?? "Guest", true, subs[pid]);
         }
         this.setState("joined");
         this.announceMute();
-        this.dispatchEvent(new CustomEvent("joined", { detail: { peerId: this.peerId } }));
+        this.dispatchEvent(new CustomEvent("joined", { detail: { peerId: this.peerId, room: msg } }));
         return;
       }
       case "peer-joined": {
         if (!msg.peerId || msg.peerId === this.peerId) return;
         // A peer that rejoins after a blip gets a fresh connection from its side.
         if (this.peers.has(msg.peerId)) this.dropPeer(msg.peerId);
-        this.ensurePeer(msg.peerId, msg.name ?? "Guest", false);
+        this.ensurePeer(msg.peerId, msg.name ?? "Guest", false, msg.sub);
         this.announceMute();
         return;
       }
@@ -286,7 +301,7 @@ export class QlaveCall extends EventTarget {
 
   // ── Peer connections ───────────────────────────────────────────────────────
 
-  private ensurePeer(peerId: string, name: string, initiator: boolean): PeerEntry {
+  private ensurePeer(peerId: string, name: string, initiator: boolean, sub?: string): PeerEntry {
     const existing = this.peers.get(peerId);
     if (existing) return existing;
 
@@ -299,7 +314,7 @@ export class QlaveCall extends EventTarget {
       ignoreOffer: false,
       queue: Promise.resolve(),
       info: {
-        peerId, name,
+        peerId, name, ...(sub ? { sub } : {}),
         stream: new MediaStream(),
         audioMuted: false, videoMuted: false,
         connection: pc.connectionState,

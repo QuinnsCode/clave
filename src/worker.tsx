@@ -160,6 +160,31 @@ const app = defineApp([
     return env.USER_SESSION_DO.get(id).fetch(request);
   }),
 
+  // Qollab voice channels (src/lib/qlave/voice.ts): eqosys-ticketed rooms and eqosys's orders.
+  // Kill switch: set the QLAVE_VOICE var to "off" (dashboard or wrangler) and both routes 404.
+  route("/__qlave/voice", async ({ request }) => {
+    if ((env as any).QLAVE_VOICE === "off") return new Response("Not found", { status: 404 });
+    const { authorizeVoice } = await import("@/lib/qlave/voice");
+    const { forwardToSession } = await import("@/lib/qlave/signalingGate");
+    const r = await authorizeVoice(request);
+    if (r instanceof Response) {
+      // Say no over the socket (4001) so the client stops instead of retrying a dead ticket.
+      if (request.headers.get("Upgrade") !== "websocket") return r;
+      const { 0: client, 1: server } = new WebSocketPair();
+      server.accept();
+      server.close(4001, (await r.text()).slice(0, 100));
+      return new Response(null, { status: 101, webSocket: client });
+    }
+    const id = env.QLAVE_SESSION_DO.idFromName(r.sessionId);
+    return env.QLAVE_SESSION_DO.get(id).fetch(forwardToSession(request, r.auth));
+  }),
+
+  route("/eqosys", async ({ request }) => {
+    if ((env as any).QLAVE_VOICE === "off") return new Response("Not found", { status: 404 });
+    const { handleEqosysOrder } = await import("@/lib/qlave/voice");
+    return handleEqosysOrder(request);
+  }),
+
   route("/__qlave/:sessionId", async ({ request, params }) => {
     const { authorizeSignaling, forwardToSession } = await import("@/lib/qlave/signalingGate");
     const auth = await authorizeSignaling(request, params.sessionId);

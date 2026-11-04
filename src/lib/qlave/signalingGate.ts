@@ -14,10 +14,12 @@ export async function authorizeSignaling(request: Request, sessionId: string): P
   const url = new URL(request.url);
   const ticket = url.searchParams.get("ticket");
   const roomCode = url.searchParams.get("roomCode");
+  // Voice rooms only open through /__qlave/voice, which runs their kick and ticket checks.
+  if (sessionId.startsWith("voice:")) return new Response("Use /__qlave/voice", { status: 403 });
 
   if (ticket) {
     const claims = await verifyTicket(ticket, sessionId);
-    if (!claims) return new Response("Invalid or expired ticket", { status: 401 });
+    if (!claims || claims.voice) return new Response("Invalid or expired ticket", { status: 401 });
     return { sessionId, siteKey: claims.app ? `app:${claims.app}` : null, maxPeers: claims.maxPeers, userId: claims.sub, app: claims.app ?? null };
   }
 
