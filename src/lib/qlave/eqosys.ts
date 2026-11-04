@@ -18,6 +18,10 @@ export interface EqosysClaims {
   name?: string;
   source?: string;
   access?: string[];
+  // Qollab voice tickets (apps/eqosys/QLAVE.md in rustybuns)
+  jti?: string;
+  iat?: number;
+  room?: string;
 }
 
 const JWKS_TTL_MS = 5 * 60 * 1000;
@@ -51,8 +55,8 @@ function unb64url(s: string): Uint8Array<ArrayBuffer> {
   return Uint8Array.from(atob(pad), c => c.charCodeAt(0));
 }
 
-/** Returns claims for a valid token whose aud is an allowed app, else null. */
-export async function verifyEqosysToken(token: string): Promise<EqosysClaims | null> {
+/** Returns claims for a valid token whose aud is one of `auds` (default: the allowed apps), else null. */
+export async function verifyEqosysToken(token: string, auds: string[] = allowedApps()): Promise<EqosysClaims | null> {
   const parts = token.split(".");
   if (parts.length !== 3) return null;
   try {
@@ -73,7 +77,7 @@ export async function verifyEqosysToken(token: string): Promise<EqosysClaims | n
     const claims = JSON.parse(new TextDecoder().decode(unb64url(parts[1]))) as EqosysClaims;
     if (claims.iss?.replace(/\/$/, "") !== issuer()) return null;
     if (!claims.exp || claims.exp < Math.floor(Date.now() / 1000)) return null;
-    if (!claims.sub || !allowedApps().includes(claims.aud)) return null;
+    if (!claims.sub || !auds.includes(claims.aud)) return null;
     return claims;
   } catch {
     return null;

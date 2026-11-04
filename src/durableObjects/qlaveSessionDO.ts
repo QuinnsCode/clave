@@ -15,6 +15,9 @@
 
 import { DurableObject } from "cloudflare:workers";
 import { setupDb, db } from "@/db";
+import { signTicket } from "@/lib/qlave/tickets";
+import { getIceServers } from "@/lib/qlave/ice";
+import { roomKey, subKey } from "@/lib/qlave/voice";
 
 const TRANSCRIPT_SAVE_INTERVAL_MS = 3 * 60 * 1000;
 const KV_TTL_SECONDS = 60 * 60 * 24 * 2; // 48hr — covers crash + recovery window
@@ -24,6 +27,7 @@ const MAX_TRANSCRIPT_CHUNKS = 5000;
 const MAX_MESSAGE_BYTES = 64 * 1024;
 const DEFAULT_MAX_PEERS = 12;
 const PEER_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
+const VOICE_RESUME_TTL_S = 12 * 60 * 60;  // reconnects within a voice session
 
 /** What the worker verified about this connection. */
 export interface QlaveAuthContext {
@@ -33,6 +37,17 @@ export interface QlaveAuthContext {
   maxPeers?: number;
   userId?: string | null;
   app?: string | null;
+  /** Qollab voice room (src/lib/qlave/voice.ts). */
+  voice?: VoiceAuth;
+}
+
+export interface VoiceAuth {
+  room: string;
+  sub: string;
+  name: string;
+  jti?: string;          // first entry: the eqosys ticket, used once
+  jtiExp?: number;
+  resumedFrom?: number;  // reconnect: when the resume ticket was minted (ms)
 }
 
 interface SessionState {
@@ -59,6 +74,13 @@ interface SocketAttachment {
   name: string;
   joined: boolean;
   userId: string | null;
+  voice?: { room: string; sub: string; name: string };
+}
+
+interface VoiceState {
+  muted: string[];                  // server-muted subs
+  kicked: Record<string, number>;   // sub -> when (ms); older resume tickets are refused
+  endedAt: number;                  // resume tickets older than this are refused
 }
 
 export class QlaveSessionDO extends DurableObject<Env> {
@@ -120,6 +142,10 @@ export class QlaveSessionDO extends DurableObject<Env> {
     if (request.method === "GET" && url.pathname.endsWith("/transcript")) {
       return this.handleGetTranscript(request);
     }
+    // Orders from eqosys, via the worker's /eqosys route (the signaling route strips x-qlave-*).
+    if (request.method === "POST" && url.pathname === "/admin" && request.headers.get("x-qlave-admin") === "1") {
+      return this.handleAdmin(await request.json());
+    }
 
     let auth: QlaveAuthContext;
     try { auth = JSON.parse(request.headers.get("x-qlave-auth") ?? ""); }
@@ -159,6 +185,15 @@ export class QlaveSessionDO extends DurableObject<Env> {
 
     const { 0: client, 1: server } = new WebSocketPair();
 
+    if (auth.voice) {
+      const refused = await this.checkVoiceEntry(auth.voice);
+      if (refused) {
+        this.state.acceptWebSocket(server, [peerId]);
+        server.close(refused.code, refused.reason);
+        return new Response(null, { status: 101, webSocket: client });
+      }
+    }
+
     // Same peerId reconnecting (tab blip): the new socket replaces the old one.
     const stale = this.state.getWebSockets(peerId);
     const others = this.joinedSockets().filter(s => s.a.peerId !== peerId);
@@ -169,7 +204,8 @@ export class QlaveSessionDO extends DurableObject<Env> {
     }
 
     this.state.acceptWebSocket(server, [peerId]);
-    server.serializeAttachment({ peerId, name: "Guest", joined: false, userId: auth.userId ?? null } satisfies SocketAttachment);
+    const voice = auth.voice ? { room: auth.voice.room, sub: auth.voice.sub, name: auth.voice.name } : undefined;
+    server.serializeAttachment({ peerId, name: voice?.name ?? "Guest", joined: false, userId: auth.userId ?? null, voice } satisfies SocketAttachment);
     for (const old of stale) {
       try { old.serializeAttachment({ ...this.attachment(old), joined: false }); old.close(4000, "replaced"); } catch { /* gone */ }
     }
@@ -232,9 +268,12 @@ export class QlaveSessionDO extends DurableObject<Env> {
         this.relay(a.peerId, data);
         if (session && session.messageCount % 50 === 0) { await this.save(); await this.syncKV(); }
         return;
-      case "mute-state":
-        this.broadcast(a.peerId, { type: "mute-state", from: a.peerId, audioMuted: !!data.audioMuted, videoMuted: !!data.videoMuted });
+      case "mute-state": {
+        // A server mute holds whatever the client says.
+        const forced = !!a.voice && (await this.voiceState()).muted.includes(a.voice.sub);
+        this.broadcast(a.peerId, { type: "mute-state", from: a.peerId, audioMuted: forced || !!data.audioMuted, videoMuted: !!data.videoMuted });
         return;
+      }
       case "caption":
         await this.handleCaption(a, data);
         return;
@@ -258,16 +297,18 @@ export class QlaveSessionDO extends DurableObject<Env> {
   // ── Handlers ───────────────────────────────────────────────────────────────
 
   private async handleJoin(ws: WebSocket, a: SocketAttachment, name?: string): Promise<void> {
-    const cleanName = (typeof name === "string" ? name : "").trim().slice(0, 64) || "Guest";
+    // Voice rooms use the name eqosys signed, not what the client says.
+    const cleanName = a.voice?.name ?? ((typeof name === "string" ? name : "").trim().slice(0, 64) || "Guest");
     const others = this.joinedSockets().filter(s => s.ws !== ws && s.a.peerId !== a.peerId);
 
     const peerNames: Record<string, string> = {};
     for (const s of others) peerNames[s.a.peerId] = s.a.name;
-    this.send(ws, { type: "joined", peerId: a.peerId, peers: others.map(s => s.a.peerId), peerNames });
+    this.send(ws, { type: "joined", peerId: a.peerId, peers: others.map(s => s.a.peerId), peerNames, ...(a.voice ? await this.voiceJoinExtras(a, others) : {}) });
 
     const wasJoined = a.joined;
     ws.serializeAttachment({ ...a, name: cleanName, joined: true } satisfies SocketAttachment);
-    if (!wasJoined) this.broadcast(a.peerId, { type: "peer-joined", peerId: a.peerId, name: cleanName });
+    if (!wasJoined) this.broadcast(a.peerId, { type: "peer-joined", peerId: a.peerId, name: cleanName, ...(a.voice ? { sub: a.voice.sub } : {}) });
+    if (a.voice) await this.indexVoice(a.voice, true);
 
     const session = await this.load();
     if (session) {
@@ -290,6 +331,7 @@ export class QlaveSessionDO extends DurableObject<Env> {
       this.broadcast(a.peerId, { type: "peer-left", peerId: a.peerId });
       if (session) this.accumulatePeerMinutes(session, a.peerId, Date.now());
     }
+    if (a.voice) await this.indexVoice(a.voice, false, ws);
 
     await this.syncKV();
     if (this.joinedSockets().filter(s => s.ws !== ws).length === 0 && session && !session.flushed) {
@@ -472,6 +514,93 @@ export class QlaveSessionDO extends DurableObject<Env> {
     } catch (e) {
       console.error("[QlaveSessionDO] transcript upsert failed:", e);
     }
+  }
+
+  // ── Voice rooms (Qollab spaces) ────────────────────────────────────────────
+
+  private async voiceState(): Promise<VoiceState> {
+    const v = await this.state.storage.get<VoiceState>("voice");
+    return { muted: [], kicked: {}, endedAt: 0, ...v };
+  }
+
+  /** Refuse a used eqosys ticket, or a resume ticket minted before a kick or an end. */
+  private async checkVoiceEntry(v: VoiceAuth): Promise<{ code: number; reason: string } | null> {
+    const vs = await this.voiceState();
+    if (v.jti) {
+      const key = `jti:${v.jti}`;
+      if (await this.state.storage.get(key)) return { code: 4001, reason: "Ticket already used" };
+      await this.state.storage.put(key, v.jtiExp ?? 0);
+      await this.pruneJtis();
+      return null;
+    }
+    const at = v.resumedFrom ?? 0;
+    if (at <= (vs.kicked[v.sub] ?? 0)) return { code: 4004, reason: "kicked" };
+    if (at <= vs.endedAt) return { code: 4005, reason: "ended" };
+    return null;
+  }
+
+  private async pruneJtis(): Promise<void> {
+    const now = Math.floor(Date.now() / 1000);
+    const all = await this.state.storage.list<number>({ prefix: "jti:", limit: 500 });
+    const old = [...all].filter(([, exp]) => exp < now).map(([k]) => k);
+    if (old.length) await this.state.storage.delete(old);
+  }
+
+  private async voiceJoinExtras(a: SocketAttachment, others: { a: SocketAttachment }[]): Promise<Record<string, unknown>> {
+    const peerSubs: Record<string, string> = {};
+    for (const s of others) if (s.a.voice) peerSubs[s.a.peerId] = s.a.voice.sub;
+    const [vs, ice, resume] = await Promise.all([
+      this.voiceState(),
+      getIceServers(),
+      signTicket({ sid: this.session?.sessionId ?? "", sub: a.voice!.sub, name: a.voice!.name, voice: true }, VOICE_RESUME_TTL_S),
+    ]);
+    return { peerSubs, serverMuted: vs.muted, iceServers: ice.iceServers, resume, self: { sub: a.voice!.sub, name: a.voice!.name } };
+  }
+
+  /** KV: which voice rooms are live and who is in them, so erase and end can find them. */
+  private async indexVoice(v: { room: string; sub: string }, joined: boolean, leaving?: WebSocket): Promise<void> {
+    const kv = this.env.RATELIMIT_KV;
+    try {
+      if (joined) {
+        await kv.put(roomKey(v.room), "1", { expirationTtl: KV_TTL_SECONDS });
+        await kv.put(subKey(v.sub, v.room), "1", { expirationTtl: KV_TTL_SECONDS });
+        return;
+      }
+      const left = this.joinedSockets().filter(s => s.ws !== leaving);
+      if (!left.some(s => s.a.voice?.sub === v.sub)) await kv.delete(subKey(v.sub, v.room));
+      if (left.length === 0) await kv.delete(roomKey(v.room));
+    } catch (e) {
+      console.error("[QlaveSessionDO] voice index failed:", e);
+    }
+  }
+
+  private async handleAdmin(order: { t?: string; sub?: string; on?: boolean; reason?: string }): Promise<Response> {
+    const vs = await this.voiceState();
+    const sockets = (sub?: string) => this.joinedSockets().filter(s => s.a.voice && (!sub || s.a.voice.sub === sub));
+
+    if (order.t === "mute" && order.sub) {
+      vs.muted = vs.muted.filter(x => x !== order.sub);
+      if (order.on) vs.muted.push(order.sub);
+      await this.state.storage.put("voice", vs);
+      const msg = JSON.stringify({ type: "server-mute", sub: order.sub, on: !!order.on });
+      for (const { ws } of this.joinedSockets()) { try { ws.send(msg); } catch { /* closing */ } }
+      return Response.json({ ok: true });
+    }
+    if (order.t === "kick" && order.sub) {
+      vs.kicked[order.sub] = Date.now();
+      await this.state.storage.put("voice", vs);
+      for (const { ws, a } of sockets(order.sub)) { await this.handleClose(ws, a); try { ws.close(4004, order.reason ?? "kicked"); } catch { /* gone */ } }
+      return Response.json({ ok: true });
+    }
+    if (order.t === "end") {
+      vs.endedAt = Date.now();
+      vs.muted = [];
+      vs.kicked = {};
+      await this.state.storage.put("voice", vs);
+      for (const { ws, a } of this.joinedSockets()) { await this.handleClose(ws, a); try { ws.close(4005, "ended"); } catch { /* gone */ } }
+      return Response.json({ ok: true });
+    }
+    return new Response("Bad order", { status: 400 });
   }
 
   // ── Send helpers ───────────────────────────────────────────────────────────
