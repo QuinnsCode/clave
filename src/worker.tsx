@@ -161,7 +161,9 @@ const app = defineApp([
   }),
 
   // Qollab voice channels (src/lib/qlave/voice.ts): eqosys-ticketed rooms and eqosys's orders.
+  // Kill switch: set the QLAVE_VOICE var to "off" (dashboard or wrangler) and both routes 404.
   route("/__qlave/voice", async ({ request }) => {
+    if ((env as any).QLAVE_VOICE === "off") return new Response("Not found", { status: 404 });
     const { authorizeVoice } = await import("@/lib/qlave/voice");
     const { forwardToSession } = await import("@/lib/qlave/signalingGate");
     const r = await authorizeVoice(request);
@@ -178,6 +180,7 @@ const app = defineApp([
   }),
 
   route("/eqosys", async ({ request }) => {
+    if ((env as any).QLAVE_VOICE === "off") return new Response("Not found", { status: 404 });
     const { handleEqosysOrder } = await import("@/lib/qlave/voice");
     return handleEqosysOrder(request);
   }),
